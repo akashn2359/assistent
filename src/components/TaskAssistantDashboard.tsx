@@ -1,281 +1,461 @@
-import React, { useState, useEffect, useRef, useMemo } from "react";
-import { 
-  Mic, 
-  MicOff, 
-  Plus, 
-  Trash2, 
-  Search, 
-  Check, 
-  Calendar, 
-  AlertCircle, 
-  Sparkles, 
-  Volume2, 
-  VolumeX, 
-  Send, 
-  ListTodo, 
-  HelpCircle,
-  Clock,
-  ChevronRight,
-  TrendingUp,
+import React, { useState, useEffect, useRef } from "react";
+import {
+  Terminal as TerminalIcon,
+  Cpu,
+  Layers,
+  Volume2,
+  VolumeX,
+  Sun,
+  Battery,
+  HardDrive,
+  Lock,
+  Moon,
+  Power,
+  Play,
+  Pause,
+  SkipForward,
+  SkipBack,
+  ExternalLink,
+  Plus,
+  Trash2,
+  Mic,
+  MicOff,
+  Send,
+  Check,
+  CheckSquare,
+  Square,
+  Volume1,
+  X,
+  Minus,
+  SquareTerminal,
+  Pin,
+  Settings,
   Activity,
-  Bot
+  FileText,
+  RefreshCw,
+  FolderOpen
 } from "lucide-react";
-import { Task, VoiceSettings } from "../types";
-import { parseNaturalLanguageDateTime } from "../lib/dateTimeParser";
 import { motion, AnimatePresence } from "motion/react";
 
-interface SpeechLog {
+// Electron API window declaration
+declare global {
+  interface Window {
+    electronAPI?: {
+      runAction: (action: string, args?: string) => Promise<string>;
+      launchApp: (targetApp: string, targetPath?: string) => Promise<boolean>;
+      shutdownControl: (action: string) => Promise<boolean>;
+      readTasksFile: () => Promise<any[]>;
+      writeTasksFile: (tasks: any[]) => Promise<boolean>;
+      openTasksInNotepad: () => Promise<boolean>;
+      windowControl: (action: string) => void;
+      onShortcutTriggered: (callback: () => void) => () => void;
+      onStatsUpdated: (callback: (stats: any) => void) => () => void;
+      startSpeech: () => Promise<{ success?: boolean; error?: string; details?: any }>;
+      stopSpeech: () => Promise<{ success?: boolean; error?: string }>;
+      getSpeechStatus: () => Promise<{ status: string; error: string | null }>;
+      onSpeechStatus: (callback: (data: { status: string }) => void) => () => void;
+      onSpeechRecognized: (callback: (text: string) => void) => () => void;
+      onSpeechRejected: (callback: () => void) => () => void;
+      onSpeechError: (callback: (error: string) => void) => () => void;
+    };
+  }
+}
+
+// Browser REST API fallback injection (Active only outside of Electron)
+if (typeof window !== "undefined" && !navigator.userAgent.toLowerCase().includes("electron")) {
+  let sse: EventSource | null = null;
+  const statusListeners = new Set<(data: any) => void>();
+  const recognizedListeners = new Set<(text: string) => void>();
+  const rejectedListeners = new Set<() => void>();
+  const errorListeners = new Set<(err: string) => void>();
+
+  const initSSE = () => {
+    if (sse) return;
+    sse = new EventSource("/api/speech/events");
+    sse.onmessage = (event) => {
+      try {
+        const data = JSON.parse(event.data);
+        if (data.type === "status") {
+          statusListeners.forEach((l) => l(data));
+        } else if (data.type === "recognized") {
+          recognizedListeners.forEach((l) => l(data.text));
+        } else if (data.type === "rejected") {
+          rejectedListeners.forEach((l) => l());
+        } else if (data.type === "error") {
+          errorListeners.forEach((l) => l(data.message));
+        }
+      } catch (err) {
+        console.error("SSE parse error", err);
+      }
+    };
+    sse.onerror = () => {
+      console.warn("SSE connection closed. Reconnecting...");
+      sse?.close();
+      sse = null;
+      setTimeout(initSSE, 3000);
+    };
+  };
+
+  initSSE();
+
+  window.electronAPI = {
+    runAction: async (action: string, args: string = ""): Promise<string> => {
+      try {
+        if (action === "SetVolume") {
+          const vol = parseFloat(args.replace("-Value ", ""));
+          const res = await fetch("/api/hardware/volume", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ volume: vol })
+          });
+          return res.ok ? "Success" : "ERROR";
+        }
+        if (action === "SetMute") {
+          const isMute = args.includes("$true");
+          const res = await fetch("/api/hardware/volume", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ mute: isMute })
+          });
+          return res.ok ? "Success" : "ERROR";
+        }
+        if (action === "SetBrightness") {
+          const bright = parseInt(args.replace("-Value ", ""), 10);
+          const res = await fetch("/api/hardware/brightness", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ brightness: bright })
+          });
+          return res.ok ? "Success" : "ERROR";
+        }
+        if (action === "SendMediaKey") {
+          const res = await fetch("/api/media/command", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ command: args })
+          });
+          return res.ok ? "Success" : "ERROR";
+        }
+        return "ERROR: Not implemented";
+      } catch (err) {
+        return "ERROR: " + err;
+      }
+    },
+    launchApp: async (targetApp: string, targetPath: string = ""): Promise<boolean> => {
+      try {
+        const res = await fetch("/api/hardware/open", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ app: targetApp, path: targetPath })
+        });
+        return res.ok;
+      } catch {
+        return false;
+      }
+    },
+    shutdownControl: async (action: string): Promise<boolean> => {
+      try {
+        const res = await fetch("/api/system/shutdown", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action })
+        });
+        return res.ok;
+      } catch {
+        return false;
+      }
+    },
+    readTasksFile: async (): Promise<any[]> => {
+      try {
+        const res = await fetch("/api/tasks");
+        if (res.ok) {
+          return await res.json();
+        }
+        return [];
+      } catch {
+        return [];
+      }
+    },
+    writeTasksFile: async (tasks: any[]): Promise<boolean> => {
+      try {
+        const res = await fetch("/api/tasks", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ tasks })
+        });
+        return res.ok;
+      } catch {
+        return false;
+      }
+    },
+    openTasksInNotepad: async (): Promise<boolean> => {
+      try {
+        const res = await fetch("/api/tasks/open", { method: "POST" });
+        return res.ok;
+      } catch {
+        return false;
+      }
+    },
+    windowControl: (action: string) => {
+      console.warn(`Window control action [${action}] is not available in browser mode.`);
+    },
+    onShortcutTriggered: (callback: () => void) => {
+      return () => {};
+    },
+    onStatsUpdated: (callback: (stats: any) => void) => {
+      return () => {};
+    },
+    startSpeech: async () => {
+      try {
+        const res = await fetch("/api/speech/start", { method: "POST" });
+        return res.ok ? { success: true } : { error: "Failed to start speech engine" };
+      } catch (err: any) {
+        return { error: err.message };
+      }
+    },
+    stopSpeech: async () => {
+      try {
+        const res = await fetch("/api/speech/stop", { method: "POST" });
+        return res.ok ? { success: true } : { error: "Failed to stop speech engine" };
+      } catch (err: any) {
+        return { error: err.message };
+      }
+    },
+    getSpeechStatus: async () => {
+      try {
+        const res = await fetch("/api/speech/status");
+        if (res.ok) return await res.json();
+        return { status: "unknown", error: "Failed to load status" };
+      } catch (err: any) {
+        return { status: "unknown", error: err.message };
+      }
+    },
+    onSpeechStatus: (callback: (data: { status: string }) => void) => {
+      statusListeners.add(callback);
+      return () => {
+        statusListeners.delete(callback);
+      };
+    },
+    onSpeechRecognized: (callback: (text: string) => void) => {
+      recognizedListeners.add(callback);
+      return () => {
+        recognizedListeners.delete(callback);
+      };
+    },
+    onSpeechRejected: (callback: () => void) => {
+      rejectedListeners.add(callback);
+      return () => {
+        rejectedListeners.delete(callback);
+      };
+    },
+    onSpeechError: (callback: (error: string) => void) => {
+      errorListeners.add(callback);
+      return () => {
+        errorListeners.delete(callback);
+      };
+    }
+  };
+}
+
+interface LogEntry {
   id: string;
-  sender: "user" | "assistant" | "system";
-  text: string;
-  timestamp: Date;
+  timestamp: string;
+  type: "info" | "success" | "warning" | "error" | "input" | "output";
+  message: string;
+}
+
+interface TaskItem {
+  id: number;
+  title: string;
+  status: "pending" | "completed";
+  created_at: string;
 }
 
 export const TaskAssistantDashboard: React.FC = () => {
-  // State for Tasks
-  const [tasks, setTasks] = useState<Task[]>(() => {
-    const saved = localStorage.getItem("voicepilot_tasks");
-    if (saved) {
-      try {
-        return JSON.parse(saved);
-      } catch (e) {
-        console.error("Failed to load tasks", e);
-      }
-    }
-    // Fallback default tasks if empty
-    return [
-      {
-        id: 1,
-        title: "Welcome to VoiceTask Assistant",
-        description: "Try speaking to me! Click the microphone and say: 'add task study math tomorrow at 4 PM'",
-        priority: "high",
-        status: "pending",
-        created_at: new Date().toISOString(),
-        due_date: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
-        completed_at: null
-      },
-      {
-        id: 2,
-        title: "Review work reports",
-        description: "Check the design documents before submitting",
-        priority: "medium",
-        status: "pending",
-        created_at: new Date().toISOString(),
-        due_date: new Date(Date.now() + 48 * 60 * 60 * 1000).toISOString(),
-        completed_at: null
-      }
-    ];
-  });
+  // Check environment mode
+  const isElectron = typeof window !== "undefined" && navigator.userAgent.toLowerCase().includes("electron");
 
-  // State for Voice Settings
-  const [voiceSettings, setVoiceSettings] = useState<VoiceSettings>({
-    voiceURI: "",
-    rate: 165,
-    pitch: 1.0,
-    volume: 1.0,
-    offlineMode: true,
-    wakeWordEnabled: false,
-    wakeWord: "assistant",
-    selectedMic: "default"
-  });
-
-  // UI state
-  const [searchQuery, setSearchQuery] = useState("");
-  const [statusFilter, setStatusFilter] = useState<"all" | "pending" | "completed">("all");
-  const [sortBy, setSortBy] = useState<"dueDate" | "priority" | "createdAt">("dueDate");
-  const [isListening, setIsListening] = useState(false);
-  const [isSpeaking, setIsSpeaking] = useState(false);
-  const [micPermissionGranted, setMicPermissionGranted] = useState<boolean | null>(null);
-  
-  // Manual Task input state
-  const [manualTitle, setManualTitle] = useState("");
-  const [manualDesc, setManualDesc] = useState("");
-  const [manualPriority, setManualPriority] = useState<Task["priority"]>("medium");
-  const [manualDueDate, setManualDueDate] = useState(() => {
-    const tmrw = new Date();
-    tmrw.setDate(tmrw.getDate() + 1);
-    tmrw.setHours(9, 0, 0, 0);
-    return tmrw.toISOString().substring(0, 16);
-  });
-
-  // Speech Recognition & Speech Logs
-  const [speechLogs, setSpeechLogs] = useState<SpeechLog[]>([
+  // Logs & Commands
+  const [logs, setLogs] = useState<LogEntry[]>([
     {
-      id: "initial",
-      sender: "assistant",
-      text: "Hello! I am your Voice Assistant. You can add tasks, complete them, or ask me to read them aloud by voice. Try clicking the microphone orb to begin.",
-      timestamp: new Date()
+      id: "init",
+      timestamp: new Date().toLocaleTimeString([], { hour12: false }),
+      type: "info",
+      message: "SYSTEM TERMINAL CORE v4.0.0 INITIALIZED."
+    },
+    {
+      id: "welcome",
+      timestamp: new Date().toLocaleTimeString([], { hour12: false }),
+      type: "success",
+      message: `VOICEPILOT ONLINE. Current Interface: ${isElectron ? "Electron Shell (Alt+A)" : "Chrome App Mode (Google STT Enabled)"}`
+    },
+    {
+      id: "private",
+      timestamp: new Date().toLocaleTimeString([], { hour12: false }),
+      type: "info",
+      message: "SECURITY PROFILE: Private local loop. Hardware commands execute on native CPU."
     }
   ]);
-  const [textCommand, setTextCommand] = useState("");
-  const [availableVoices, setAvailableVoices] = useState<SpeechSynthesisVoice[]>([]);
-  const [micVolumeLevel, setMicVolumeLevel] = useState(0);
+  const [inputCommand, setInputCommand] = useState("");
+  const [isListening, setIsListening] = useState(false);
+  const [isSpeaking, setIsSpeaking] = useState(false);
+  const [speechEnabled, setSpeechEnabled] = useState(true);
+  const [alwaysOnTop, setAlwaysOnTop] = useState(false);
+  const [isProcessing, setIsProcessing] = useState(false);
 
-  const recognitionRef = useRef<any>(null);
-  const scrollRef = useRef<HTMLDivElement>(null);
+  // Speech engine modes
+  const [speechEngineMode, setSpeechEngineMode] = useState<"local" | "browser">("local");
+  const [speechEngineStatus, setSpeechEngineStatus] = useState<string>("initializing");
+  const [speechEngineError, setSpeechEngineError] = useState<string | null>(null);
+
+  // Audio visualizer state
+  const [micVolumeLevel, setMicVolumeLevel] = useState(0);
   const audioContextRef = useRef<AudioContext | null>(null);
   const analyserRef = useRef<AnalyserNode | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const animationFrameRef = useRef<number | null>(null);
 
-  // Sync scroll to bottom of speech logs
-  useEffect(() => {
-    if (scrollRef.current) {
-      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
-    }
-  }, [speechLogs]);
+  // Live Telemetry
+  const [telemetry, setTelemetry] = useState({
+    cpu: 0,
+    ram: 0,
+    batteryLevel: 100,
+    charging: true,
+    diskCapacity: 0,
+    volume: 50,
+    brightness: 50
+  });
 
-  // Load SpeechSynthesis voices
+  // Notepad Tasks
+  const [tasks, setTasks] = useState<TaskItem[]>([]);
+  const [newTaskTitle, setNewTaskTitle] = useState("");
+
+  const logsEndRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
+  const recognitionRef = useRef<any>(null);
+
+  // 1. Initialize stats/tasks on mount
   useEffect(() => {
-    const loadVoices = () => {
-      if (typeof window !== "undefined" && window.speechSynthesis) {
-        const voices = window.speechSynthesis.getVoices();
-        setAvailableVoices(voices);
-        if (voices.length > 0 && !voiceSettings.voiceURI) {
-          const defaultVoice = voices.find(v => v.lang.startsWith("en")) || voices[0];
-          setVoiceSettings(prev => ({ ...prev, voiceURI: defaultVoice.voiceURI }));
-        }
+    let statsInterval: NodeJS.Timeout | null = null;
+
+    const initialize = async () => {
+      // Load Tasks
+      await loadTasks();
+
+      if (isElectron && window.electronAPI) {
+        // Listen for stats updates (Electron pushes stats via IPC)
+        window.electronAPI.onStatsUpdated((stats) => {
+          setTelemetry((prev) => ({
+            ...prev,
+            cpu: stats.cpu,
+            ram: stats.ram,
+            batteryLevel: stats.batteryLevel,
+            charging: stats.charging,
+            diskCapacity: stats.diskCapacity,
+            volume: stats.volume !== undefined ? stats.volume : prev.volume,
+            brightness: stats.brightness !== undefined && stats.brightness >= 0 ? stats.brightness : prev.brightness
+          }));
+        });
+
+        // Listen for global shortcut Alt+A
+        window.electronAPI.onShortcutTriggered(() => {
+          addLog("Summoned via global shortcut [Alt+A].", "info");
+          speak("Assistant active.");
+          if (inputRef.current) {
+            inputRef.current.focus();
+          }
+        });
+      } else {
+        // Browser mode fallback: poll Express REST API for system statistics
+        const pollStats = async () => {
+          try {
+            const res = await fetch("/api/system/stats");
+            if (res.ok) {
+              const stats = await res.json();
+              setTelemetry((prev) => ({
+                ...prev,
+                cpu: stats.cpu,
+                ram: stats.ram,
+                batteryLevel: stats.batteryLevel,
+                charging: stats.charging,
+                diskCapacity: stats.diskCapacity,
+                volume: stats.volume !== undefined ? stats.volume : prev.volume,
+                brightness: stats.brightness !== undefined && stats.brightness >= 0 ? stats.brightness : prev.brightness
+              }));
+            }
+          } catch (err) {
+            // Silence telemetry poll errors
+          }
+        };
+        
+        await pollStats();
+        statsInterval = setInterval(pollStats, 3000);
       }
     };
 
-    loadVoices();
-    if (typeof window !== "undefined" && window.speechSynthesis) {
-      window.speechSynthesis.onvoiceschanged = loadVoices;
-    }
+    initialize();
+
+    return () => {
+      stopAudioAnalyzer();
+      if (statsInterval) {
+        clearInterval(statsInterval);
+      }
+    };
   }, []);
 
-  // Save tasks to localStorage
-  const saveTasks = (updatedTasks: Task[]) => {
-    setTasks(updatedTasks);
-    localStorage.setItem("voicepilot_tasks", JSON.stringify(updatedTasks));
-  };
+  // 2. Sync scroll bar for terminal logs
+  useEffect(() => {
+    logsEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [logs]);
 
-  // Toast Helper
-  const [toastMessage, setToastMessage] = useState<string | null>(null);
-  const triggerToast = (msg: string) => {
-    setToastMessage(msg);
-    setTimeout(() => {
-      setToastMessage(null);
-    }, 3000);
-  };
+  // 3. Periodic Notepad task sync (every 5 seconds)
+  useEffect(() => {
+    const interval = setInterval(async () => {
+      if (window.electronAPI) {
+        const fileTasks = await window.electronAPI.readTasksFile();
+        if (JSON.stringify(fileTasks) !== JSON.stringify(tasks)) {
+          setTasks(fileTasks);
+        }
+      }
+    }, 5000);
+    return () => clearInterval(interval);
+  }, [tasks]);
 
-  // Add Log Entry
-  const addLog = (sender: "user" | "assistant" | "system", text: string) => {
-    setSpeechLogs(prev => [
+  // Logs helper
+  const addLog = (message: string, type: LogEntry["type"] = "info") => {
+    const time = new Date().toLocaleTimeString([], { hour12: false });
+    setLogs((prev) => [
       ...prev,
       {
         id: Math.random().toString(),
-        sender,
-        text,
-        timestamp: new Date()
+        timestamp: time,
+        type,
+        message
       }
     ]);
   };
 
-  // Web Speech Synthesis (TTS)
-  const speak = (text: string) => {
-    if (typeof window === "undefined" || !window.speechSynthesis) {
-      triggerToast("Text-to-speech not supported");
-      return;
-    }
-
-    window.speechSynthesis.cancel();
-    const utterance = new SpeechSynthesisUtterance(text);
-    
-    if (voiceSettings.voiceURI) {
-      const selected = availableVoices.find(v => v.voiceURI === voiceSettings.voiceURI);
-      if (selected) utterance.voice = selected;
-    }
-
-    utterance.rate = voiceSettings.rate / 170; // Map range to logical speaking speed
-    utterance.volume = voiceSettings.volume;
-    utterance.pitch = voiceSettings.pitch;
-
-    utterance.onstart = () => setIsSpeaking(true);
-    utterance.onend = () => setIsSpeaking(false);
-    utterance.onerror = () => setIsSpeaking(false);
-
-    window.speechSynthesis.speak(utterance);
-  };
-
-  // Web Speech Recognition (STT) setup
-  const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
-
-  const startListening = async () => {
-    if (!SpeechRecognition) {
-      addLog("system", "Speech Recognition is not supported in this browser environment. You can type commands in the text bar.");
-      triggerToast("Voice recognition not supported");
-      return;
-    }
-
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      streamRef.current = stream;
-      setMicPermissionGranted(true);
-      
-      // Setup audio analyzer for voice visualizer
-      setupAudioAnalyzer(stream);
-
-      const recognition = new SpeechRecognition();
-      recognitionRef.current = recognition;
-      recognition.continuous = false;
-      recognition.interimResults = false;
-      recognition.lang = "en-US";
-
-      recognition.onstart = () => {
-        setIsListening(true);
-        window.speechSynthesis.cancel();
-        setIsSpeaking(false);
-      };
-
-      recognition.onerror = (e: any) => {
-        console.error("Speech Recognition Error:", e);
-        setIsListening(false);
-        stopAudioAnalyzer();
-        if (e.error === "not-allowed") {
-          setMicPermissionGranted(false);
-          addLog("system", "Microphone permission denied. Please grant permission in your system settings.");
-        } else {
-          addLog("system", `Audio capture issue: ${e.error}`);
-        }
-      };
-
-      recognition.onend = () => {
-        setIsListening(false);
-        stopAudioAnalyzer();
-      };
-
-      recognition.onresult = (event: any) => {
-        const transcript = event.results[0][0].transcript;
-        addLog("user", transcript);
-        processCommand(transcript);
-      };
-
-      recognition.start();
-    } catch (err) {
-      console.error("Mic Access Error:", err);
-      setMicPermissionGranted(false);
-      addLog("system", "Cannot access microphone. Please ensure a mic is plugged in and permissions are granted.");
-      triggerToast("Microphone access denied");
+  // Load Tasks from Notepad file
+  const loadTasks = async () => {
+    if (window.electronAPI) {
+      const loaded = await window.electronAPI.readTasksFile();
+      setTasks(loaded);
     }
   };
 
-  const stopListening = () => {
-    if (recognitionRef.current) {
-      recognitionRef.current.stop();
-      recognitionRef.current = null;
+  // Save Tasks back to Notepad file
+  const saveTasks = async (updatedTasks: TaskItem[]) => {
+    if (window.electronAPI) {
+      setTasks(updatedTasks);
+      await window.electronAPI.writeTasksFile(updatedTasks);
     }
-    if (streamRef.current) {
-      streamRef.current.getTracks().forEach(track => track.stop());
-      streamRef.current = null;
-    }
-    setIsListening(false);
-    stopAudioAnalyzer();
   };
 
-  // Setup AudioContext for real volume input visualization
+  // Audio stream analyzer for mic visualization
   const setupAudioAnalyzer = (stream: MediaStream) => {
     try {
+      stopAudioAnalyzer(); 
+      
       const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
       const audioCtx = new AudioContextClass();
       audioContextRef.current = audioCtx;
@@ -299,8 +479,7 @@ export const TaskAssistantDashboard: React.FC = () => {
           sum += dataArray[i];
         }
         const average = sum / bufferLength;
-        // Normalize
-        setMicVolumeLevel(Math.min(average / 128, 1));
+        setMicVolumeLevel(Math.min(average / 90, 1));
         animationFrameRef.current = requestAnimationFrame(updateVolume);
       };
 
@@ -320,849 +499,1154 @@ export const TaskAssistantDashboard: React.FC = () => {
       audioContextRef.current = null;
     }
     analyserRef.current = null;
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach((track) => track.stop());
+      streamRef.current = null;
+    }
     setMicVolumeLevel(0);
   };
 
-  // Toggle Microphone
-  const handleMicToggle = () => {
-    if (isListening) {
-      stopListening();
-    } else {
-      startListening();
+  // Text-To-Speech (TTS)
+  const speak = (text: string) => {
+    if (!speechEnabled) return;
+    if (typeof window === "undefined" || !window.speechSynthesis) return;
+
+    window.speechSynthesis.cancel();
+    const utterance = new SpeechSynthesisUtterance(text);
+    const voices = window.speechSynthesis.getVoices();
+    const selectedVoice = voices.find((v) => v.lang.startsWith("en")) || voices[0];
+    if (selectedVoice) {
+      utterance.voice = selectedVoice;
     }
+    utterance.rate = 1.0;
+    utterance.pitch = 1.0;
+    utterance.volume = 1.0;
+
+    utterance.onstart = () => setIsSpeaking(true);
+    utterance.onend = () => setIsSpeaking(false);
+    utterance.onerror = () => setIsSpeaking(false);
+
+    window.speechSynthesis.speak(utterance);
   };
 
-  // Add Task manually via Form
-  const handleManualAdd = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!manualTitle.trim()) {
-      triggerToast("Task title is required");
-      return;
+  // Speech Recognition (Dual Engine: Local Offline & Browser Cloud)
+  const SpeechRecognition =
+    (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+
+  const startVoiceInput = async () => {
+    // 1. Always prompt for microphone to animate visualizer
+    let stream: MediaStream | null = null;
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      streamRef.current = stream;
+      setupAudioAnalyzer(stream);
+    } catch (err: any) {
+      console.warn("Visualizer mic access error:", err);
+      // We will still try to start speech, but visualizer won't run.
+      addLog(`Mic Visualizer Permission Denied: ${err.message}`, "warning");
     }
 
-    const newTask: Task = {
-      id: tasks.length > 0 ? Math.max(...tasks.map(t => t.id)) + 1 : 1,
-      title: manualTitle.trim(),
-      description: manualDesc.trim(),
-      priority: manualPriority,
-      status: new Date(manualDueDate) < new Date() ? "overdue" : "pending",
-      created_at: new Date().toISOString(),
-      due_date: new Date(manualDueDate).toISOString(),
-      completed_at: null
-    };
+    window.speechSynthesis.cancel();
+    setIsSpeaking(false);
 
-    const updated = [...tasks, newTask];
-    saveTasks(updated);
-    addLog("system", `Created task #${newTask.id}: "${newTask.title}" manually`);
-    triggerToast(`Task "${newTask.title}" added`);
-    
-    // Clear inputs
-    setManualTitle("");
-    setManualDesc("");
-    setManualPriority("medium");
-    const tmrw = new Date();
-    tmrw.setDate(tmrw.getDate() + 1);
-    tmrw.setHours(9, 0, 0, 0);
-    setManualDueDate(tmrw.toISOString().substring(0, 16));
-  };
-
-  // Delete Task
-  const deleteTask = (id: number) => {
-    const taskToDelete = tasks.find(t => t.id === id);
-    if (!taskToDelete) return;
-    
-    const updated = tasks.filter(t => t.id !== id);
-    saveTasks(updated);
-    addLog("system", `Deleted task: "${taskToDelete.title}" (ID: ${id})`);
-    triggerToast("Task deleted");
-  };
-
-  // Complete/Toggle Task Completion
-  const toggleTaskComplete = (id: number) => {
-    const updated = tasks.map(t => {
-      if (t.id === id) {
-        const nextStatus = t.status === "completed" ? "pending" : "completed";
-        return {
-          ...t,
-          status: nextStatus as any,
-          completed_at: nextStatus === "completed" ? new Date().toISOString() : null
-        };
+    if (speechEngineMode === "local") {
+      // Use Local Offline Speech Recognition Engine
+      if (!window.electronAPI) {
+        addLog("Local speech interface not available.", "error");
+        stopAudioAnalyzer();
+        return;
       }
-      return t;
-    });
-    saveTasks(updated);
-    
-    const item = updated.find(t => t.id === id);
-    if (item) {
-      addLog("system", `Marked task #${id} ("${item.title}") as ${item.status}`);
-      speak(`Task ${item.title} marked as ${item.status === "completed" ? "completed" : "pending"}`);
-    }
-  };
-
-  // Core Natural Language Voice Command Processor
-  const processCommand = (query: string) => {
-    const clean = query.trim().toLowerCase();
-    
-    // 1. Say/Read Tasks Aloud Command
-    if (
-      clean.includes("say my tasks") || 
-      clean.includes("say tasks") || 
-      clean.includes("read my tasks") || 
-      clean.includes("read tasks") || 
-      clean.includes("tell me my tasks") || 
-      clean.includes("what are my tasks") || 
-      clean.includes("list my tasks") || 
-      clean.includes("list tasks")
-    ) {
-      const pending = tasks.filter(t => t.status !== "completed");
-      if (pending.length === 0) {
-        const msg = "You have no pending tasks in your list. Excellent work!";
-        addLog("assistant", msg);
-        speak(msg);
-      } else {
-        const taskSpokenList = pending.map((t, idx) => `${idx + 1}. ${t.title}`).join(", ");
-        const responseText = `You have ${pending.length} pending tasks: ${taskSpokenList}`;
-        addLog("assistant", responseText);
-        speak(responseText);
-      }
-      return;
-    }
-
-    // 2. Add Task Voice Command
-    // Matches: "add task buy milk tomorrow at 8 PM" or "create task review layout"
-    const addPrefixes = ["add task ", "create task ", "new task ", "remind me to "];
-    let matchedAddPrefix = addPrefixes.find(p => clean.startsWith(p));
-    
-    if (matchedAddPrefix) {
-      const remaining = query.substring(matchedAddPrefix.length).trim();
-      const datePhrases = ["tomorrow at", "next monday at", "next friday at", "friday at", "at ", "in "];
       
-      let titlePart = remaining;
-      let datePart = "";
-
-      for (const phrase of datePhrases) {
-        const index = remaining.toLowerCase().indexOf(phrase);
-        if (index !== -1) {
-          titlePart = remaining.substring(0, index).trim();
-          datePart = remaining.substring(index).trim();
-          break;
-        }
+      addLog("Starting offline voice engine (native)...", "info");
+      setIsListening(true);
+      
+      const res = await window.electronAPI.startSpeech();
+      if (res && res.error) {
+        addLog(`Offline Speech Engine failed to start: ${res.error}. Details: ${res.details || ""}`, "error");
+        setIsListening(false);
+        stopAudioAnalyzer();
       }
-
-      // Trim trailing "at" if it got left behind
-      if (titlePart.toLowerCase().endsWith(" at")) {
-        titlePart = titlePart.substring(0, titlePart.length - 3).trim();
-      }
-
-      if (!titlePart) {
-        const reply = "I heard the task creation command, but I couldn't find a task title. Try saying: 'add task buy groceries tomorrow at 5 PM'";
-        addLog("assistant", reply);
-        speak(reply);
+    } else {
+      // Use Chrome Browser Cloud Speech Recognition Engine
+      if (!SpeechRecognition) {
+        addLog("Speech recognition not supported in this browser. Please use Google Chrome.", "error");
+        stopAudioAnalyzer();
         return;
       }
 
-      const parsed = parseNaturalLanguageDateTime(datePart || "tomorrow");
-      const nextId = tasks.length > 0 ? Math.max(...tasks.map(t => t.id)) + 1 : 1;
-      
-      const newTask: Task = {
-        id: nextId,
-        title: titlePart,
-        description: `Added by voice command: "${query}"`,
-        priority: "medium",
-        status: parsed.dateTime < new Date() ? "overdue" : "pending",
-        created_at: new Date().toISOString(),
-        due_date: parsed.dateTime.toISOString(),
-        completed_at: null
-      };
+      try {
+        const recognition = new SpeechRecognition();
+        recognitionRef.current = recognition;
+        recognition.continuous = false;
+        recognition.interimResults = false;
+        recognition.lang = "en-US";
 
-      const updated = [...tasks, newTask];
-      saveTasks(updated);
-      
-      const response = `Added task: "${newTask.title}", scheduled for ${parsed.dateTime.toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}`;
-      addLog("assistant", response);
-      speak(response);
-      triggerToast(`Voice task #${nextId} created`);
-      return;
+        recognition.onstart = () => {
+          setIsListening(true);
+          addLog("Voice engine listening (cloud)...", "info");
+        };
+
+        recognition.onerror = (e: any) => {
+          console.error("Speech Recognition Error:", e);
+          setIsListening(false);
+          stopAudioAnalyzer();
+          
+          if (e.error === "network") {
+            addLog("Voice engine error: network. Note: Standalone Electron windows block Google Speech recognition. Please use 'Offline Local' mode for 100% private voice control.", "error");
+            speak("Speech recognition network error. Please use offline local mode.");
+          } else {
+            addLog(`Voice engine error: ${e.error}`, "error");
+          }
+        };
+
+        recognition.onend = () => {
+          setIsListening(false);
+          stopAudioAnalyzer();
+        };
+
+        recognition.onresult = (event: any) => {
+          const transcript = event.results[0][0].transcript;
+          addLog(`User spoken: "${transcript}"`, "input");
+          handleCommand(transcript);
+        };
+
+        recognition.start();
+      } catch (err: any) {
+        console.error("Browser mic access error:", err);
+        addLog(`Speech Recognition failed: ${err.message}`, "error");
+        setIsListening(false);
+        stopAudioAnalyzer();
+      }
     }
-
-    // 3. Complete Task Voice Command
-    // Matches: "complete task 2", "finish task buy groceries", "mark task 1 as completed"
-    if (
-      clean.includes("complete task") || 
-      clean.includes("finish task") || 
-      clean.includes("mark task ")
-    ) {
-      // Try extracting an ID first
-      const idMatch = clean.match(/(?:task|id)\s+(\d+)/) || clean.match(/(\d+)/);
-      if (idMatch) {
-        const id = parseInt(idMatch[1], 10);
-        const task = tasks.find(t => t.id === id);
-        if (task) {
-          toggleTaskComplete(id);
-          return;
-        }
-      }
-
-      // Try matching by exact or partial title
-      // E.g. "complete task buy milk" -> title query is "buy milk"
-      let phraseToSearch = "";
-      if (clean.includes("complete task ")) {
-        phraseToSearch = clean.split("complete task ")[1];
-      } else if (clean.includes("finish task ")) {
-        phraseToSearch = clean.split("finish task ")[1];
-      } else if (clean.includes("mark task ")) {
-        phraseToSearch = clean.split("mark task ")[1].replace("as completed", "").replace("as complete", "").replace("completed", "").replace("complete", "").trim();
-      }
-
-      if (phraseToSearch) {
-        const matchedTask = tasks.find(t => t.title.toLowerCase().includes(phraseToSearch));
-        if (matchedTask) {
-          toggleTaskComplete(matchedTask.id);
-          return;
-        }
-      }
-
-      const reply = "I couldn't identify which task to mark completed. Try specifying the task number or title, like: 'complete task 1'";
-      addLog("assistant", reply);
-      speak(reply);
-      return;
-    }
-
-    // 4. Delete/Remove Task Voice Command
-    // Matches: "delete task 1", "remove task study history"
-    if (clean.includes("delete task") || clean.includes("remove task") || clean.includes("clear task")) {
-      const idMatch = clean.match(/(?:task|id)\s+(\d+)/) || clean.match(/(\d+)/);
-      if (idMatch) {
-        const id = parseInt(idMatch[1], 10);
-        const task = tasks.find(t => t.id === id);
-        if (task) {
-          deleteTask(id);
-          speak(`Task ${id} has been removed.`);
-          return;
-        }
-      }
-
-      let phraseToSearch = "";
-      if (clean.includes("delete task ")) {
-        phraseToSearch = clean.split("delete task ")[1];
-      } else if (clean.includes("remove task ")) {
-        phraseToSearch = clean.split("remove task ")[1];
-      } else if (clean.includes("clear task ")) {
-        phraseToSearch = clean.split("clear task ")[1];
-      }
-
-      if (phraseToSearch) {
-        const matchedTask = tasks.find(t => t.title.toLowerCase().includes(phraseToSearch));
-        if (matchedTask) {
-          deleteTask(matchedTask.id);
-          speak(`Removed task: ${matchedTask.title}`);
-          return;
-        }
-      }
-
-      const reply = "I couldn't find the task to delete. Please specify the task number or title, like: 'delete task 2'";
-      addLog("assistant", reply);
-      speak(reply);
-      return;
-    }
-
-    // 5. Remove completed tasks command
-    if (clean.includes("remove completed tasks") || clean.includes("delete completed tasks") || clean.includes("clear completed tasks")) {
-      const completedCount = tasks.filter(t => t.status === "completed").length;
-      if (completedCount === 0) {
-        const reply = "You have no completed tasks to remove.";
-        addLog("assistant", reply);
-        speak(reply);
-      } else {
-        const updated = tasks.filter(t => t.status !== "completed");
-        saveTasks(updated);
-        const reply = `Cleaned up task history. Purged ${completedCount} completed tasks.`;
-        addLog("assistant", reply);
-        speak(reply);
-        triggerToast("Completed tasks cleared");
-      }
-      return;
-    }
-
-    // 6. Help Command
-    if (clean === "help" || clean.includes("show commands") || clean.includes("what can i say")) {
-      const reply = "You can say: 'add task buy milk', 'read tasks', 'complete task 1', or 'delete task 1'.";
-      addLog("assistant", reply);
-      speak(reply);
-      return;
-    }
-
-    // Fallback error reply
-    const fallbackReply = `I recognized your speech: "${query}", but I don't have a task action mapped for that phrase. Try saying "add task" or "say tasks".`;
-    addLog("assistant", fallbackReply);
-    speak("I did not recognize that command. Try add task or read tasks.");
   };
 
-  // Submit Text Input command
-  const handleTextCommandSubmit = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!textCommand.trim()) return;
+  const stopVoiceInput = async () => {
+    if (speechEngineMode === "local") {
+      if (window.electronAPI) {
+        await window.electronAPI.stopSpeech();
+      }
+    } else {
+      if (recognitionRef.current) {
+        recognitionRef.current.stop();
+        recognitionRef.current = null;
+      }
+    }
+    setIsListening(false);
+    stopAudioAnalyzer();
+  };
+
+  // Helper to normalize text digits (e.g. "delete task one" -> "delete task 1")
+  const normalizeSpokenNumbers = (text: string): string => {
+    const wordNumbers: { [key: string]: string } = {
+      one: "1", two: "2", three: "3", four: "4", five: "5",
+      six: "6", seven: "7", eight: "8", nine: "9", ten: "10"
+    };
+    return text
+      .split(/\s+/)
+      .map((word) => wordNumbers[word.toLowerCase()] || word)
+      .join(" ");
+  };
+
+  // Notepad Task Operations
+  const handleAddTask = async (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
+    if (!newTaskTitle.trim()) return;
+
+    const newId = tasks.length > 0 ? Math.max(...tasks.map((t) => t.id)) + 1 : 1;
+    const newTask: TaskItem = {
+      id: newId,
+      title: newTaskTitle.trim(),
+      status: "pending",
+      created_at: new Date().toISOString()
+    };
+
+    const updated = [...tasks, newTask];
+    await saveTasks(updated);
+    addLog(`Task appended to tasks.txt: "${newTask.title}"`, "success");
+    speak(`Added task ${newTask.title}`);
+    setNewTaskTitle("");
+  };
+
+  const toggleTask = async (id: number) => {
+    const updated = tasks.map((t) => {
+      if (t.id === id) {
+        const nextStatus = t.status === "completed" ? "pending" : "completed";
+        speak(`Task marked as ${nextStatus}`);
+        return { ...t, status: nextStatus as "pending" | "completed" };
+      }
+      return t;
+    });
+    await saveTasks(updated);
+    addLog(`Toggled status of task ID ${id}`, "info");
+  };
+
+  const deleteTask = async (id: number) => {
+    const target = tasks.find((t) => t.id === id);
+    const updated = tasks.filter((t) => t.id !== id);
+    await saveTasks(updated);
+    if (target) {
+      addLog(`Deleted task: "${target.title}"`, "warning");
+      speak(`Removed task ${target.title}`);
+    }
+  };
+
+  const openNotepadFile = async () => {
+    if (window.electronAPI) {
+      await window.electronAPI.openTasksInNotepad();
+      addLog("Opening tasks.txt in Notepad...", "info");
+      speak("Opening tasks file in notepad");
+    }
+  };
+
+  // Main Command Handler (100% Offline Logic)
+  const handleCommand = async (rawCommand: string) => {
+    if (!rawCommand.trim()) return;
     
-    addLog("user", textCommand);
-    processCommand(textCommand);
-    setTextCommand("");
+    // Normalize punctuation and spoken numbers
+    const cleanCommand = rawCommand.trim().replace(/[.,\/#!$%\^&\*;:{}=\-_`~()?]/g, "");
+    const normalizedCmd = normalizeSpokenNumbers(cleanCommand);
+    const clean = normalizedCmd.toLowerCase().trim();
+
+    addLog(`Processing command: "${normalizedCmd}"`, "info");
+
+    if (!window.electronAPI) {
+      addLog("Local server link missing.", "error");
+      return;
+    }
+
+    setIsProcessing(true);
+
+    // ==========================================
+    // OFFLINE COMMAND MATCHERS (Zero Network)
+    // ==========================================
+
+    // 1. HELP / COMMANDS LIST
+    if (clean === "help" || clean === "commands" || clean === "what can i say") {
+      const helpText =
+        "Supported commands:\n" +
+        "• System Volume:\n" +
+        "  - 'volume 50', 'volume to 80', 'mute', 'unmute'\n" +
+        "  - 'volume up', 'volume down', 'louder', 'quieter'\n" +
+        "• Screen Brightness:\n" +
+        "  - 'brightness 60', 'brightness to 90'\n" +
+        "  - 'brightness up', 'brightness down', 'brighter', 'dimmer'\n" +
+        "• Task Files (tasks.txt):\n" +
+        "  - 'add task buy milk', 'remind me to wash the car'\n" +
+        "  - 'complete task 1', 'complete buy milk'\n" +
+        "  - 'delete task 2', 'remove task buy milk'\n" +
+        "  - 'read tasks', 'list tasks', 'open tasks file'\n" +
+        "• Application Launchers:\n" +
+        "  - 'open notepad', 'open calculator', 'open browser', 'open downloads'\n" +
+        "• Hardware Media Buttons:\n" +
+        "  - 'play', 'pause', 'play music', 'next song', 'skip', 'previous track'\n" +
+        "• System Power Controls:\n" +
+        "  - 'lock pc', 'sleep pc', 'shutdown pc', 'restart pc', 'abort shutdown'\n" +
+        "• Hardware Telemetry:\n" +
+        "  - 'system stats', 'telemetry', 'check status'";
+      addLog(helpText, "info");
+      speak("Displaying available offline commands.");
+      setIsProcessing(false);
+      return;
+    }
+
+    // 2. VOLUME CONTROLS
+    if (clean === "mute" || clean === "silence") {
+      await window.electronAPI.runAction("SetMute", "-MuteState $true");
+      addLog("System muted successfully.", "success");
+      speak("System muted.");
+      setIsProcessing(false);
+      return;
+    }
+    if (clean === "unmute" || clean === "unsilence") {
+      await window.electronAPI.runAction("SetMute", "-MuteState $false");
+      addLog("System unmuted successfully.", "success");
+      speak("System unmuted.");
+      setIsProcessing(false);
+      return;
+    }
+    const volMatch = clean.match(/(?:set\s+)?volume\s+(?:to\s+)?(\d+)/) || clean.match(/^volume\s+(\d+)$/);
+    if (volMatch) {
+      const val = parseInt(volMatch[1], 10);
+      if (val >= 0 && val <= 100) {
+        await window.electronAPI.runAction("SetVolume", `-Value ${val}`);
+        addLog(`System volume set to ${val}%.`, "success");
+        speak(`Volume set to ${val} percent.`);
+        setIsProcessing(false);
+        return;
+      }
+    }
+    if (clean === "volume up" || clean === "increase volume" || clean === "louder" || clean === "raise volume") {
+      const nextVol = Math.min(telemetry.volume + 10, 100);
+      await window.electronAPI.runAction("SetVolume", `-Value ${nextVol}`);
+      addLog(`System volume increased to ${nextVol}%.`, "success");
+      speak(`Volume ${nextVol} percent.`);
+      setIsProcessing(false);
+      return;
+    }
+    if (clean === "volume down" || clean === "decrease volume" || clean === "quieter" || clean === "lower volume") {
+      const nextVol = Math.max(telemetry.volume - 10, 0);
+      await window.electronAPI.runAction("SetVolume", `-Value ${nextVol}`);
+      addLog(`System volume decreased to ${nextVol}%.`, "success");
+      speak(`Volume ${nextVol} percent.`);
+      setIsProcessing(false);
+      return;
+    }
+
+    // 3. BRIGHTNESS CONTROLS
+    const brightMatch = clean.match(/(?:set\s+)?brightness\s+(?:to\s+)?(\d+)/) || clean.match(/^brightness\s+(\d+)$/);
+    if (brightMatch) {
+      const val = parseInt(brightMatch[1], 10);
+      if (val >= 0 && val <= 100) {
+        await window.electronAPI.runAction("SetBrightness", `-Value ${val}`);
+        addLog(`Screen brightness set to ${val}%.`, "success");
+        speak(`Brightness set to ${val} percent.`);
+        setIsProcessing(false);
+        return;
+      }
+    }
+    if (clean === "brightness up" || clean === "increase brightness" || clean === "brighter") {
+      const nextBright = Math.min((telemetry.brightness >= 0 ? telemetry.brightness : 50) + 10, 100);
+      await window.electronAPI.runAction("SetBrightness", `-Value ${nextBright}`);
+      addLog(`Screen brightness increased to ${nextBright}%.`, "success");
+      speak(`Brightness ${nextBright} percent.`);
+      setIsProcessing(false);
+      return;
+    }
+    if (clean === "brightness down" || clean === "decrease brightness" || clean === "dimmer") {
+      const nextBright = Math.max((telemetry.brightness >= 0 ? telemetry.brightness : 50) - 10, 0);
+      await window.electronAPI.runAction("SetBrightness", `-Value ${nextBright}`);
+      addLog(`Screen brightness decreased to ${nextBright}%.`, "success");
+      speak(`Brightness ${nextBright} percent.`);
+      setIsProcessing(false);
+      return;
+    }
+
+    // 4. APP LAUNCHERS
+    if (clean === "open notepad" || clean === "launch notepad" || clean === "notepad") {
+      await window.electronAPI.launchApp("notepad");
+      addLog("Launching Notepad...", "success");
+      speak("Opening Notepad.");
+      setIsProcessing(false);
+      return;
+    }
+    if (clean === "open calculator" || clean === "open calc" || clean === "launch calculator" || clean === "calculator" || clean === "calc") {
+      await window.electronAPI.launchApp("calc");
+      addLog("Launching Calculator...", "success");
+      speak("Opening Calculator.");
+      setIsProcessing(false);
+      return;
+    }
+    if (clean === "open browser" || clean === "open chrome" || clean === "launch browser" || clean === "browser" || clean === "web") {
+      await window.electronAPI.launchApp("browser", "https://google.com");
+      addLog("Opening web browser...", "success");
+      speak("Opening browser.");
+      setIsProcessing(false);
+      return;
+    }
+    if (clean === "open downloads" || clean === "downloads") {
+      await window.electronAPI.launchApp("folder");
+      addLog("Opening Downloads folder...", "success");
+      speak("Opening Downloads.");
+      setIsProcessing(false);
+      return;
+    }
+    if (clean === "open tasks file" || clean === "edit tasks file" || clean === "open notepad tasks" || clean === "tasks file" || clean === "open tasks") {
+      await openNotepadFile();
+      setIsProcessing(false);
+      return;
+    }
+
+    // 5. MEDIA CONTROLS
+    if (
+      clean === "play" ||
+      clean === "pause" ||
+      clean === "play music" ||
+      clean === "pause music" ||
+      clean === "toggle play" ||
+      clean === "play/pause"
+    ) {
+      await window.electronAPI.runAction("SendMediaKey", "play_pause");
+      addLog("Media Play/Pause command dispatched.", "success");
+      speak("Toggled media.");
+      setIsProcessing(false);
+      return;
+    }
+    if (clean === "next" || clean === "next song" || clean === "skip song" || clean === "skip" || clean === "next track") {
+      await window.electronAPI.runAction("SendMediaKey", "next");
+      addLog("Media Next Track command dispatched.", "success");
+      speak("Next track.");
+      setIsProcessing(false);
+      return;
+    }
+    if (clean === "previous" || clean === "prev song" || clean === "previous song" || clean === "go back" || clean === "prev track" || clean === "previous track") {
+      await window.electronAPI.runAction("SendMediaKey", "previous");
+      addLog("Media Previous Track command dispatched.", "success");
+      speak("Previous track.");
+      setIsProcessing(false);
+      return;
+    }
+
+    // 6. SYSTEM POWER CONTROLS
+    if (clean === "lock pc" || clean === "lock screen" || clean === "lock computer" || clean === "lock workstation" || clean === "lock") {
+      addLog("Locking workstation...", "warning");
+      speak("Locking screen.");
+      await window.electronAPI.shutdownControl("lock");
+      setIsProcessing(false);
+      return;
+    }
+    if (clean === "sleep pc" || clean === "sleep computer" || clean === "put computer to sleep" || clean === "sleep") {
+      addLog("Suspending workstation (sleep)...", "warning");
+      speak("Putting computer to sleep.");
+      await window.electronAPI.shutdownControl("sleep");
+      setIsProcessing(false);
+      return;
+    }
+    if (clean === "shutdown pc" || clean === "shutdown computer" || clean === "shutdown") {
+      addLog("WARNING: System shutdown initiated! Scheduled in 15 seconds. Say 'abort shutdown' to cancel.", "error");
+      speak("System shutdown initiated. Scheduled in fifteen seconds. Say abort shutdown to cancel.");
+      await window.electronAPI.shutdownControl("shutdown");
+      setIsProcessing(false);
+      return;
+    }
+    if (clean === "restart pc" || clean === "restart computer" || clean === "restart" || clean === "reboot") {
+      addLog("WARNING: System restart initiated! Scheduled in 15 seconds. Say 'abort shutdown' to cancel.", "error");
+      speak("System restart initiated. Scheduled in fifteen seconds. Say abort shutdown to cancel.");
+      await window.electronAPI.shutdownControl("restart");
+      setIsProcessing(false);
+      return;
+    }
+    if (clean === "abort shutdown" || clean === "cancel shutdown" || clean === "stop shutdown" || clean === "abort") {
+      await window.electronAPI.shutdownControl("abort");
+      addLog("System shutdown sequence cancelled.", "success");
+      speak("Shutdown sequence aborted.");
+      setIsProcessing(false);
+      return;
+    }
+
+    // 7. TASK MANAGER CONTROLS (Voice Commands)
+    
+    // A. Add Task (Matches: "add task buy milk", "add todo read book", "remind me to wash the car")
+    const taskAddMatch = 
+      clean.match(/^add\s+(?:task|todo)\s+(.+)$/) || 
+      clean.match(/^create\s+task\s+(.+)$/) ||
+      clean.match(/^new\s+task\s+(.+)$/) ||
+      clean.match(/^remind\s+me\s+to\s+(.+)$/) ||
+      clean.match(/^add\s+(.+)\s+to\s+(?:my\s+)?tasks$/) ||
+      clean.match(/^add\s+(.+)\s+to\s+(?:my\s+)?todo\s*list$/);
+
+    if (taskAddMatch) {
+      const title = taskAddMatch[1].trim();
+      const newId = tasks.length > 0 ? Math.max(...tasks.map((t) => t.id)) + 1 : 1;
+      const newTask: TaskItem = {
+        id: newId,
+        title: title,
+        status: "pending",
+        created_at: new Date().toISOString()
+      };
+      const updated = [...tasks, newTask];
+      await saveTasks(updated);
+      addLog(`Added task: "${title}"`, "success");
+      speak(`Added task ${title}`);
+      setIsProcessing(false);
+      return;
+    }
+
+    // B. Complete/Check Task (Matches: "complete task 3", "complete buy milk")
+    const completeMatch = clean.match(/^(?:complete|finish|check|checkoff)\s+(?:task|todo)?\s*(.+)$/);
+    if (completeMatch) {
+      const query = completeMatch[1].trim();
+      const numId = parseInt(query, 10);
+      
+      if (!isNaN(numId)) {
+        // Complete by numeric ID
+        const target = tasks.find((t) => t.id === numId);
+        if (target) {
+          await toggleTask(numId);
+          setIsProcessing(false);
+          return;
+        }
+      } else {
+        // Complete by text query title matching
+        const matchedTask = tasks.find(
+          (t) => t.status === "pending" && t.title.toLowerCase().includes(query)
+        );
+        if (matchedTask) {
+          await toggleTask(matchedTask.id);
+          setIsProcessing(false);
+          return;
+        }
+      }
+    }
+
+    // C. Delete/Remove Task (Matches: "delete task 2", "remove task buy milk")
+    const deleteMatch = clean.match(/^(?:delete|remove|clear|erase)\s+(?:task|todo)?\s*(.+)$/);
+    if (deleteMatch) {
+      const query = deleteMatch[1].trim();
+      const numId = parseInt(query, 10);
+
+      if (!isNaN(numId)) {
+        // Delete by numeric ID
+        const target = tasks.find((t) => t.id === numId);
+        if (target) {
+          await deleteTask(numId);
+          setIsProcessing(false);
+          return;
+        }
+      } else {
+        // Delete by text query title matching
+        const matchedTask = tasks.find((t) => t.title.toLowerCase().includes(query));
+        if (matchedTask) {
+          await deleteTask(matchedTask.id);
+          setIsProcessing(false);
+          return;
+        }
+      }
+    }
+
+    // D. Display/Read Tasks (Matches: "read tasks", "what are my tasks", "list tasks")
+    if (
+      clean.includes("read task") ||
+      clean.includes("display task") ||
+      clean.includes("show task") ||
+      clean.includes("list task") ||
+      clean.includes("read todo") ||
+      clean.includes("list todo") ||
+      clean === "what are my tasks" ||
+      clean === "what is my tasks" ||
+      clean === "tell me my tasks" ||
+      clean === "display tasks" ||
+      clean === "show tasks" ||
+      clean === "show my tasks"
+    ) {
+      const pending = tasks.filter((t) => t.status === "pending");
+      if (pending.length === 0) {
+        const msg = "You have no pending tasks in your notepad file.";
+        addLog(msg, "success");
+        speak(msg);
+      } else {
+        const taskListStr = pending.map((t, idx) => `${idx + 1}. ${t.title}`).join(", ");
+        const responseText = `You have ${pending.length} pending tasks: ${taskListStr}`;
+        addLog(responseText, "success");
+        speak(responseText);
+      }
+      setIsProcessing(false);
+      return;
+    }
+
+    // 8. TELEMETRY RESOURCES CHECK
+    if (
+      clean === "check system resources" ||
+      clean === "system stats" ||
+      clean === "system status" ||
+      clean === "check status" ||
+      clean === "status" ||
+      clean === "telemetry"
+    ) {
+      const statusText = `System telemetry: CPU is at ${telemetry.cpu}%, memory load is at ${telemetry.ram}%, and C-drive capacity is at ${telemetry.diskCapacity}% usage.`;
+      addLog(statusText, "success");
+      speak(statusText);
+      setIsProcessing(false);
+      return;
+    }
+
+    // fallback when offline command doesn't match
+    const fallbackMsg = `Instruction not recognized: "${normalizedCmd}". Type 'help' to list valid offline system commands.`;
+    addLog(fallbackMsg, "warning");
+    speak("Instruction not recognized.");
+
+    setIsProcessing(false);
   };
 
-  // Read single task title aloud (via TTS icon click)
-  const speakSingleTask = (task: Task) => {
-    speak(`Task ${task.id}: ${task.title}. Priority is ${task.priority}. Due date is ${new Date(task.due_date).toLocaleDateString()}. Status: ${task.status}.`);
+  // UI Window Actions
+  const handleWindowAction = (action: string) => {
+    if (window.electronAPI) {
+      if (action === "toggle-always-on-top") {
+        window.electronAPI.windowControl("toggle-always-on-top");
+        setAlwaysOnTop(!alwaysOnTop);
+        addLog(`Always on Top set to ${!alwaysOnTop ? "ON" : "OFF"}`, "info");
+      } else {
+        window.electronAPI.windowControl(action);
+      }
+    }
   };
 
-  // Filtered & Sorted Tasks list
-  const processedTasks = useMemo(() => {
-    const now = new Date();
-    return tasks
-      .filter(t => {
-        // Search text match
-        const matchesSearch = t.title.toLowerCase().includes(searchQuery.toLowerCase()) || 
-                              t.description.toLowerCase().includes(searchQuery.toLowerCase());
-        
-        // Status filter match
-        let matchesStatus = true;
-        if (statusFilter === "completed") {
-          matchesStatus = t.status === "completed";
-        } else if (statusFilter === "pending") {
-          matchesStatus = t.status === "pending" || t.status === "overdue";
-        }
+  // 4. Background Speech Recognition engine event subscriptions
+  useEffect(() => {
+    if (!window.electronAPI) return;
 
-        return matchesSearch && matchesStatus;
-      })
-      .sort((a, b) => {
-        if (sortBy === "dueDate") {
-          return new Date(a.due_date).getTime() - new Date(b.due_date).getTime();
-        } else if (sortBy === "priority") {
-          const weights = { urgent: 4, high: 3, medium: 2, low: 1 };
-          return weights[b.priority] - weights[a.priority];
-        } else {
-          return new Date(b.created_at).getTime() - new Date(a.created_at).getTime();
-        }
-      });
-  }, [tasks, searchQuery, statusFilter, sortBy]);
+    // Get initial status
+    window.electronAPI.getSpeechStatus().then((info: any) => {
+      if (info) {
+        setSpeechEngineStatus(info.status);
+        setSpeechEngineError(info.error);
+      }
+    }).catch(() => {});
 
-  // Statistics
-  const stats = useMemo(() => {
-    const total = tasks.length;
-    const completed = tasks.filter(t => t.status === "completed").length;
-    const pending = tasks.filter(t => t.status === "pending").length;
-    const overdue = tasks.filter(t => t.status === "overdue" || (t.status !== "completed" && new Date(t.due_date) < new Date())).length;
-    return { total, completed, pending: pending + overdue, overdue };
-  }, [tasks]);
+    const unsubStatus = window.electronAPI.onSpeechStatus((data: any) => {
+      if (data && data.status) {
+        setSpeechEngineStatus(data.status);
+      }
+    });
+
+    const unsubRecognized = window.electronAPI.onSpeechRecognized((text: string) => {
+      addLog(`User spoken (offline): "${text}"`, "input");
+      handleCommand(text);
+    });
+
+    const unsubRejected = window.electronAPI.onSpeechRejected(() => {
+      addLog("Speech rejected: command not recognized.", "warning");
+    });
+
+    const unsubError = window.electronAPI.onSpeechError((err: string) => {
+      setSpeechEngineError(err);
+      addLog(`Voice engine error: ${err}`, "error");
+    });
+
+    return () => {
+      unsubStatus();
+      unsubRecognized();
+      unsubRejected();
+      unsubError();
+    };
+  }, []);
+
+  // Keyboard Command Submit
+  const onSubmitCommand = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!inputCommand.trim()) return;
+    const cmdText = inputCommand;
+    addLog(`PILOT@SYSTEM:~$ ${cmdText}`, "input");
+    handleCommand(cmdText);
+    setInputCommand("");
+  };
 
   return (
-    <div className="w-full max-w-6xl h-[700px] flex flex-col bg-[#070b13]/85 backdrop-blur-xl border border-slate-800/60 rounded-3xl overflow-hidden shadow-2xl relative font-sans">
+    <div className="w-full h-full flex flex-col bg-slate-950/90 backdrop-blur-xl border border-emerald-500/30 rounded-2xl overflow-hidden shadow-[0_0_50px_rgba(16,185,129,0.15)] text-slate-100 font-mono select-none relative">
       
-      {/* Background ambient glowing decorations */}
-      <div className="absolute top-[-100px] left-[-100px] w-96 h-96 rounded-full bg-emerald-500/5 blur-[120px] pointer-events-none" />
-      <div className="absolute bottom-[-100px] right-[-100px] w-[500px] h-[500px] rounded-full bg-indigo-500/5 blur-[150px] pointer-events-none" />
+      {/* 1. Cyberpunk Title Bar (Draggable) */}
+      <div 
+        className="w-full h-11 flex items-center justify-between bg-slate-900/90 border-b border-emerald-500/20 px-4 shrink-0 relative z-10"
+        style={{ WebkitAppRegion: "drag" } as React.CSSProperties}
+      >
+        <div className="flex items-center gap-2">
+          <TerminalIcon className="w-4 h-4 text-emerald-400 animate-pulse" />
+          <span className="text-xs font-bold text-slate-300 tracking-wider flex items-center gap-1.5">
+            VOICEPILOT <span className="text-slate-500 font-normal">//</span> SYSTEM TERMINAL v4.0.0
+          </span>
+          <div className="flex items-center gap-1.5 ml-4 bg-slate-955 border border-emerald-500/20 px-2 py-0.5 rounded-full">
+            <span className="w-2 h-2 rounded-full bg-emerald-400 animate-ping" />
+            <span className="text-[9px] text-emerald-400 font-bold uppercase">OFFLINE MODE</span>
+          </div>
+        </div>
 
-      {/* Floating Status Toast */}
-      <AnimatePresence>
-        {toastMessage && (
-          <motion.div
-            initial={{ opacity: 0, y: 50, scale: 0.95 }}
-            animate={{ opacity: 1, y: 0, scale: 1 }}
-            exit={{ opacity: 0, y: 20, scale: 0.95 }}
-            className="absolute bottom-6 right-6 z-50 bg-slate-900/90 border border-slate-700/80 text-slate-200 px-4 py-2.5 rounded-xl shadow-2xl flex items-center gap-2 text-xs font-mono"
+        {/* Window controls (No drag) */}
+        <div 
+          className="flex items-center gap-1.5"
+          style={{ WebkitAppRegion: "no-drag" } as React.CSSProperties}
+        >
+          {/* Always on top toggle */}
+          <button
+            onClick={() => handleWindowAction("toggle-always-on-top")}
+            className={`p-1.5 rounded transition-colors cursor-pointer ${
+              alwaysOnTop 
+                ? "bg-emerald-500/10 text-emerald-400 border border-emerald-500/30" 
+                : "text-slate-500 hover:text-slate-300 hover:bg-slate-800"
+            }`}
+            title="Always on Top"
           >
-            <div className="w-2 h-2 rounded-full bg-emerald-400 animate-ping" />
-            <span>{toastMessage}</span>
-          </motion.div>
-        )}
-      </AnimatePresence>
+            <Pin className="w-3.5 h-3.5" />
+          </button>
+          
+          {/* Audio voice response toggle */}
+          <button
+            onClick={() => {
+              setSpeechEnabled(!speechEnabled);
+              addLog(`Voice feedback set to ${!speechEnabled ? "ENABLED" : "MUTED"}.`, "info");
+            }}
+            className={`p-1.5 rounded transition-colors cursor-pointer ${
+              speechEnabled 
+                ? "bg-indigo-500/10 text-indigo-400 border border-indigo-500/20" 
+                : "text-slate-500 hover:text-slate-300 hover:bg-slate-800"
+            }`}
+            title="Toggle Voice Feedback"
+          >
+            {speechEnabled ? <Volume2 className="w-3.5 h-3.5" /> : <VolumeX className="w-3.5 h-3.5" />}
+          </button>
 
-      {/* 1. Header Title Bar */}
-      <header className="flex items-center justify-between border-b border-slate-800/60 px-6 py-4 shrink-0 bg-[#090f1a]/80 relative z-10">
-        <div className="flex items-center gap-3">
-          <div className="w-9 h-9 rounded-xl bg-gradient-to-tr from-emerald-500 to-indigo-500 flex items-center justify-center shadow-lg shadow-emerald-500/10">
-            <Bot className="w-5 h-5 text-white" />
-          </div>
-          <div>
-            <h1 className="text-base font-bold text-slate-100 tracking-wide flex items-center gap-2">
-              VoiceTask Pro
-              <span className="text-[10px] bg-slate-800 text-slate-400 font-mono px-2 py-0.5 rounded-full font-medium border border-slate-750">
-                Desktop Assistant
-              </span>
-            </h1>
-            <p className="text-[10px] text-slate-400 font-medium">Local database active • Speech engine online</p>
-          </div>
+          <span className="w-px h-4 bg-slate-800 mx-1" />
+
+          {/* Minimize */}
+          <button
+            onClick={() => handleWindowAction("minimize")}
+            className="p-1.5 rounded text-slate-500 hover:text-slate-300 hover:bg-slate-800 cursor-pointer"
+          >
+            <Minus className="w-3.5 h-3.5" />
+          </button>
+          {/* Maximize */}
+          <button
+            onClick={() => handleWindowAction("maximize")}
+            className="p-1.5 rounded text-slate-500 hover:text-slate-300 hover:bg-slate-800 cursor-pointer"
+          >
+            <SquareTerminal className="w-3.5 h-3.5" />
+          </button>
+          {/* Close */}
+          <button
+            onClick={() => handleWindowAction("close")}
+            className="p-1.5 rounded text-rose-500 hover:text-white hover:bg-rose-950/50 cursor-pointer"
+          >
+            <X className="w-3.5 h-3.5" />
+          </button>
         </div>
+      </div>
 
-        {/* Global Stats cards */}
-        <div className="flex items-center gap-4 bg-slate-900/50 border border-slate-800/60 px-4 py-1.5 rounded-2xl">
-          <div className="text-center px-2 border-r border-slate-800/80">
-            <span className="block text-[10px] uppercase font-bold tracking-wider text-slate-500">Pending</span>
-            <span className="text-xs font-mono font-bold text-emerald-400">{stats.pending}</span>
-          </div>
-          <div className="text-center px-2 border-r border-slate-800/80">
-            <span className="block text-[10px] uppercase font-bold tracking-wider text-slate-500">Overdue</span>
-            <span className="text-xs font-mono font-bold text-rose-400">{stats.overdue}</span>
-          </div>
-          <div className="text-center px-2">
-            <span className="block text-[10px] uppercase font-bold tracking-wider text-slate-500">Completed</span>
-            <span className="text-xs font-mono font-bold text-indigo-400">{stats.completed}</span>
-          </div>
-        </div>
-      </header>
-
-      {/* 2. Main Workspace Layout */}
-      <div className="flex-1 grid grid-cols-1 lg:grid-cols-12 min-h-0 relative z-10">
+      {/* 2. Grid Workspace Layout */}
+      <div className="flex-1 grid grid-cols-12 min-h-0 relative z-10">
         
         {/* ========================================== */}
-        {/* LEFT COLUMN: Voice Control & Sandbox (5/12 cols) */}
+        {/* LEFT COLUMN: Terminal Logs & Inputs (7/12) */}
         {/* ========================================== */}
-        <section className="lg:col-span-5 border-r border-slate-800/60 p-5 flex flex-col min-h-0 bg-[#060a12]/40">
+        <div className="col-span-7 flex flex-col min-h-0 border-r border-emerald-500/10 bg-slate-950/45 p-4">
           
-          {/* Section Header */}
-          <div className="flex items-center justify-between pb-3 border-b border-slate-800/60 mb-4 shrink-0">
-            <div className="flex items-center gap-2">
-              <div className={`w-2.5 h-2.5 rounded-full ${isListening ? "bg-emerald-500 animate-pulse" : isSpeaking ? "bg-indigo-500 animate-pulse" : "bg-slate-600"}`} />
-              <h2 className="text-xs font-bold text-slate-300 uppercase tracking-widest font-mono">
-                {isListening ? "Listening Mode" : isSpeaking ? "Speaking Mode" : "Voice Control Hub"}
-              </h2>
-            </div>
-            
-            {/* Voice select settings */}
-            <select
-              value={voiceSettings.voiceURI}
-              onChange={(e) => setVoiceSettings(p => ({ ...p, voiceURI: e.target.value }))}
-              className="max-w-[150px] text-[10px] bg-slate-900 border border-slate-800 text-slate-400 px-2 py-1 rounded focus:outline-none"
-              title="Voice Profile"
-            >
-              {availableVoices.length === 0 ? (
-                <option>Default Voice</option>
-              ) : (
-                availableVoices.map(v => (
-                  <option key={v.voiceURI} value={v.voiceURI}>{v.name} ({v.lang.substring(0,2).toUpperCase()})</option>
-                ))
-              )}
-            </select>
+          {/* Scrolling Terminal Output */}
+          <div className="flex-1 overflow-y-auto mb-4 space-y-2.5 pr-2 font-mono text-xs select-text">
+            {logs.map((log) => (
+              <div key={log.id} className="flex items-start gap-2 leading-relaxed">
+                <span className="text-slate-500 shrink-0 select-none">[{log.timestamp}]</span>
+                <span className={`
+                  ${log.type === "input" ? "text-cyan-400 font-bold" : ""}
+                  ${log.type === "output" ? "text-indigo-300" : ""}
+                  ${log.type === "success" ? "text-emerald-400 font-semibold" : ""}
+                  ${log.type === "warning" ? "text-amber-400" : ""}
+                  ${log.type === "error" ? "text-rose-400 font-bold" : ""}
+                  ${log.type === "info" ? "text-slate-300" : ""}
+                `}>
+                  {log.message}
+                </span>
+              </div>
+            ))}
+            <div ref={logsEndRef} />
           </div>
 
-          {/* Central Microphone Orb */}
-          <div className="flex-1 flex flex-col items-center justify-center py-6 gap-3 shrink-0 select-none relative">
-            <div className="relative">
-              {/* Outer pulsing glow */}
+          {/* Glowing Animated Circular Soundwave Visualizer */}
+          <div className="h-24 flex items-center justify-center shrink-0 border-y border-emerald-500/10 mb-4 bg-slate-950/30 rounded-xl relative overflow-hidden">
+            {/* Visualizer background lines */}
+            <div className="absolute inset-0 bg-[linear-gradient(to_right,#0f172a_1px,transparent_1px)] bg-[size:4rem_4rem] [mask-image:radial-gradient(ellipse_60%_50%_at_50%_50%,#000_70%,transparent_100%)] opacity-30" />
+
+            <div className="flex items-center justify-center relative">
               <AnimatePresence>
-                {(isListening || isSpeaking) && (
+                {/* Listening Glow rings that pulsate dynamically with user voice volume */}
+                {isListening && (
+                  <>
+                    <motion.div
+                      style={{
+                        transform: `scale(${1.2 + micVolumeLevel * 1.5})`,
+                        boxShadow: `0 0 ${20 + micVolumeLevel * 40}px rgba(16,185,129,${0.3 + micVolumeLevel * 0.7})`
+                      }}
+                      className="absolute w-12 h-12 rounded-full border-2 border-emerald-400 bg-emerald-400/5 transition-all duration-75"
+                    />
+                    <motion.div
+                      style={{
+                        transform: `scale(${1.0 + micVolumeLevel * 0.9})`
+                      }}
+                      className="absolute w-16 h-16 rounded-full border border-emerald-500 bg-emerald-500/5 transition-all duration-75"
+                    />
+                  </>
+                )}
+
+                {/* Speaking Wave rings */}
+                {isSpeaking && (
                   <motion.div
-                    initial={{ scale: 0.9, opacity: 0.6 }}
-                    animate={{ 
-                      scale: isSpeaking ? [1.1, 1.25, 1.1] : [1.15, 1.35, 1.15],
-                      opacity: [0.4, 0.1, 0.4]
-                    }}
+                    initial={{ scale: 0.9 }}
+                    animate={{ scale: [1, 1.25, 1] }}
                     exit={{ opacity: 0 }}
-                    transition={{ 
-                      repeat: Infinity, 
-                      duration: isSpeaking ? 1.5 : 2.0, 
-                      ease: "easeInOut" 
-                    }}
-                    className={`absolute -inset-6 rounded-full blur-xl ${
-                      isSpeaking ? "bg-indigo-500/20" : "bg-emerald-500/20"
-                    }`}
+                    transition={{ duration: 0.8, repeat: Infinity, ease: "easeInOut" }}
+                    className="absolute -inset-4 rounded-full border border-indigo-400/40 bg-indigo-500/5 blur-sm"
+                  />
+                )}
+
+                {/* Processing Ring */}
+                {isProcessing && (
+                  <motion.div
+                    animate={{ rotate: 360 }}
+                    transition={{ repeat: Infinity, duration: 1.5, ease: "linear" }}
+                    className="absolute -inset-3 rounded-full border-2 border-dashed border-indigo-500/40"
                   />
                 )}
               </AnimatePresence>
 
-              {/* Pulsing micro-waves inside the microphone area */}
+              {/* Core Assistant Orb */}
               <button
-                onClick={handleMicToggle}
-                className={`w-28 h-28 rounded-full flex flex-col items-center justify-center transition-all duration-300 shadow-2xl relative z-10 border-4 cursor-pointer focus:outline-none ${
+                onClick={isListening ? stopVoiceInput : startVoiceInput}
+                className={`w-12 h-12 rounded-full flex items-center justify-center transition-all duration-300 z-10 border cursor-pointer focus:outline-none ${
                   isListening
-                    ? "bg-emerald-950/80 border-emerald-400 text-emerald-200 scale-105"
+                    ? "bg-emerald-950 border-emerald-400 text-emerald-400 shadow-[0_0_15px_rgba(16,185,129,0.5)]"
                     : isSpeaking
-                    ? "bg-indigo-950/80 border-indigo-400 text-indigo-200 scale-102"
-                    : "bg-slate-900/90 border-slate-800 text-slate-400 hover:bg-slate-850 hover:border-slate-650 hover:text-slate-200"
+                    ? "bg-indigo-950 border-indigo-400 text-indigo-400 shadow-[0_0_15px_rgba(99,102,241,0.5)]"
+                    : isProcessing
+                    ? "bg-slate-900 border-indigo-500 text-indigo-400 animate-pulse"
+                    : "bg-slate-900 border-slate-700 text-slate-400 hover:border-emerald-500 hover:text-emerald-400 hover:shadow-[0_0_10px_rgba(16,185,129,0.3)]"
                 }`}
-                title={isListening ? "Click to stop listening" : "Click to start voice command"}
+                title={isListening ? "Stop Listening" : "Start Voice command"}
               >
                 {isListening ? (
-                  <Mic className="w-10 h-10 text-emerald-400 animate-pulse" />
+                  <Mic className="w-5 h-5 text-emerald-400 animate-pulse" />
                 ) : isSpeaking ? (
-                  <Volume2 className="w-10 h-10 text-indigo-400 animate-bounce" />
+                  <Volume2 className="w-5 h-5 text-indigo-400" />
                 ) : (
-                  <MicOff className="w-10 h-10 text-slate-500" />
+                  <MicOff className="w-5 h-5" />
                 )}
-                <span className="text-[9px] font-mono mt-2 font-bold tracking-widest uppercase">
-                  {isListening ? "Listening" : isSpeaking ? "Speaking" : "Click to Speak"}
-                </span>
               </button>
 
-              {/* Simulated microphone wave feedback bar */}
-              {isListening && (
-                <div className="absolute -bottom-4 left-1/2 -translate-x-1/2 flex items-center gap-0.5 h-3">
-                  {[...Array(5)].map((_, i) => {
-                    const h = [12, 24, 16, 28, 8][i] * (0.3 + micVolumeLevel * 0.7);
-                    return (
-                      <span 
-                        key={i} 
-                        className="w-1 rounded-full bg-emerald-400 transition-all duration-75"
-                        style={{ height: `${h}px` }}
-                      />
-                    );
-                  })}
-                </div>
+              <span className="absolute left-16 text-[10px] tracking-widest font-bold uppercase text-slate-500 w-32">
+                {isListening ? (
+                  <span className="text-emerald-400 flex items-center gap-1">
+                    VOX ACTIVE <span className="text-[8px] opacity-75 font-mono">({Math.round(micVolumeLevel * 100)}%)</span>
+                  </span>
+                ) : isSpeaking ? (
+                  <span className="text-indigo-400">VOX SPEAKING</span>
+                ) : isProcessing ? (
+                  <span className="text-indigo-400 animate-pulse">PROCESSING</span>
+                ) : (
+                  "VOX SLEEPING"
+                )}
+              </span>
+            </div>
+          </div>
+
+          {/* Unified CommandLine Terminal Input */}
+          <form onSubmit={onSubmitCommand} className="flex items-center gap-2 bg-slate-950 border border-emerald-500/20 rounded-lg px-3 py-2 shrink-0">
+            <span className="text-emerald-400 font-bold select-none">PILOT@SYSTEM:~$</span>
+            <div className="flex-1 flex items-center relative">
+              <input
+                ref={inputRef}
+                type="text"
+                value={inputCommand}
+                onChange={(e) => setInputCommand(e.target.value)}
+                placeholder="Enter command or tap the mic orb..."
+                className="w-full bg-transparent border-none outline-none font-mono text-xs text-slate-100 placeholder-slate-600 focus:ring-0 p-0"
+                autoFocus
+              />
+              {/* Blinking block terminal cursor animation when input is active */}
+              {inputCommand === "" && (
+                <div className="w-2 h-3.5 bg-emerald-400/80 animate-pulse ml-0.5 pointer-events-none absolute left-0" />
               )}
             </div>
-            
-            <p className="text-[10px] font-mono text-slate-500 text-center mt-3 max-w-[250px]">
-              {isListening 
-                ? "Listening... Speak task commands now." 
-                : isSpeaking 
-                ? "Reading task list aloud." 
-                : "Push microphone to interact by voice."}
-            </p>
-          </div>
-
-          {/* Transcript / Bot Logs Box */}
-          <div className="h-44 border border-slate-800/60 bg-slate-950/50 rounded-2xl flex flex-col overflow-hidden mb-3">
-            <div className="bg-[#0b101c] border-b border-slate-850 px-3 py-1.5 flex items-center justify-between shrink-0">
-              <span className="text-[9px] font-mono font-bold tracking-wider text-slate-400 uppercase">
-                Dialogue Engine Console
-              </span>
-              <button 
-                onClick={() => setSpeechLogs([{ id: "clr", sender: "system", text: "Console history reset.", timestamp: new Date() }])}
-                className="text-[8px] font-mono text-slate-650 hover:text-slate-400 uppercase"
-              >
-                Flush Logs
-              </button>
-            </div>
-            
-            <div ref={scrollRef} className="flex-1 p-3 overflow-y-auto space-y-2 text-[11px] font-mono">
-              {speechLogs.map(log => {
-                let badgeClass = "text-slate-500";
-                let name = "SYSTEM";
-                
-                if (log.sender === "user") {
-                  badgeClass = "text-emerald-400 font-bold";
-                  name = "YOU";
-                } else if (log.sender === "assistant") {
-                  badgeClass = "text-indigo-400 font-bold";
-                  name = "ASSISTANT";
-                }
-
-                return (
-                  <div key={log.id} className="leading-relaxed border-b border-slate-900/40 pb-1.5 last:border-0">
-                    <span className={`text-[9px] mr-1.5 uppercase select-none tracking-wider ${badgeClass}`}>
-                      [{name}]
-                    </span>
-                    <span className={log.sender === "user" ? "text-slate-250 italic" : "text-slate-350"}>
-                      {log.text}
-                    </span>
-                  </div>
-                );
-              })}
-            </div>
-          </div>
-
-          {/* Quick Voice Triggers & Commands List */}
-          <div className="bg-[#090e18]/80 border border-slate-850/80 rounded-2xl p-3 shrink-0">
-            <div className="flex items-center gap-1.5 text-[10px] uppercase font-bold tracking-widest text-slate-400 font-mono mb-2">
-              <Sparkles className="w-3.5 h-3.5 text-emerald-400" />
-              <span>Voice sandbox & phrases</span>
-            </div>
-
-            {/* Simulated preset command buttons */}
-            <div className="grid grid-cols-2 gap-1.5 mb-2.5">
-              <button
-                onClick={() => {
-                  addLog("user", "say my tasks");
-                  processCommand("say my tasks");
-                }}
-                className="text-[9px] font-mono text-left bg-slate-900/60 hover:bg-[#0c1c24] hover:text-emerald-400 border border-slate-800 p-2 rounded-lg transition"
-              >
-                📢 "Say tasks"
-              </button>
-              <button
-                onClick={() => {
-                  const demoTask = "buy fresh milk today at 6 PM";
-                  addLog("user", `add task ${demoTask}`);
-                  processCommand(`add task ${demoTask}`);
-                }}
-                className="text-[9px] font-mono text-left bg-slate-900/60 hover:bg-[#0c1c24] hover:text-emerald-400 border border-slate-800 p-2 rounded-lg transition"
-              >
-                ➕ "Add task buy milk..."
-              </button>
-              <button
-                onClick={() => {
-                  const pending = tasks.filter(t => t.status !== "completed");
-                  const demoId = pending.length > 0 ? pending[0].id : 1;
-                  addLog("user", `complete task ${demoId}`);
-                  processCommand(`complete task ${demoId}`);
-                }}
-                className="text-[9px] font-mono text-left bg-slate-900/60 hover:bg-[#0c1c24] hover:text-emerald-400 border border-slate-800 p-2 rounded-lg transition"
-              >
-                ✅ "Complete task..."
-              </button>
-              <button
-                onClick={() => {
-                  addLog("user", "remove completed tasks");
-                  processCommand("remove completed tasks");
-                }}
-                className="text-[9px] font-mono text-left bg-slate-900/60 hover:bg-[#0c1c24] hover:text-emerald-400 border border-slate-800 p-2 rounded-lg transition"
-              >
-                🧹 "Clean completed"
-              </button>
-            </div>
-
-            {/* Direct text keyboard command line */}
-            <form onSubmit={handleTextCommandSubmit} className="flex gap-1.5 border-t border-slate-850/60 pt-2.5">
-              <input
-                type="text"
-                placeholder="Type task command manually..."
-                value={textCommand}
-                onChange={(e) => setTextCommand(e.target.value)}
-                className="flex-1 text-[11px] bg-[#05080e] border border-slate-800 rounded-lg px-2.5 py-1.5 font-mono text-slate-300 placeholder-slate-650 focus:outline-none focus:border-emerald-500"
-              />
-              <button
-                type="submit"
-                className="bg-emerald-950 border border-emerald-800 hover:bg-emerald-900 text-emerald-300 px-3 hover:border-emerald-500 transition flex items-center justify-center rounded-lg cursor-pointer text-xs"
-              >
-                <Send className="w-3.5 h-3.5" />
-              </button>
-            </form>
-          </div>
-
-        </section>
+            <button 
+              type="submit" 
+              className="p-1 rounded text-slate-500 hover:text-emerald-400 hover:bg-slate-900 transition-colors cursor-pointer"
+            >
+              <Send className="w-4 h-4" />
+            </button>
+          </form>
+        </div>
 
         {/* ========================================== */}
-        {/* RIGHT COLUMN: Tasks Registry Board (7/12 cols) */}
+        {/* RIGHT COLUMN: Telemetry & Notepad Tasks (5/12) */}
         {/* ========================================== */}
-        <section className="lg:col-span-7 p-5 flex flex-col min-h-0 bg-[#070b13]/20">
+        <div className="col-span-5 flex flex-col min-h-0 bg-slate-950/20 p-4 space-y-4 overflow-y-auto">
           
-          {/* Top Panel Actions: Search, Filter tabs & Sort */}
-          <div className="flex flex-col gap-3 pb-3 border-b border-slate-800/60 mb-4 shrink-0">
-            <div className="flex items-center gap-2">
-              <div className="flex-1 relative">
-                <Search className="w-3.5 h-3.5 text-slate-500 absolute left-3 top-1/2 -translate-y-1/2" />
-                <input
-                  type="text"
-                  placeholder="Search task titles or descriptions..."
-                  value={searchQuery}
-                  onChange={e => setSearchQuery(e.target.value)}
-                  className="w-full bg-[#090f1a]/80 border border-slate-800 focus:border-emerald-500/80 rounded-xl pl-9 pr-3 py-1.5 text-xs text-slate-350 placeholder-slate-600 focus:outline-none"
-                />
+          {/* Widget 1: Telemetry Dashboard */}
+          <div className="bg-slate-950/60 border border-emerald-500/10 rounded-xl p-3.5 animate-pulse-subtle">
+            <div className="flex items-center gap-2 mb-3.5 border-b border-emerald-500/10 pb-1.5">
+              <Activity className="w-3.5 h-3.5 text-emerald-400" />
+              <span className="text-[10px] uppercase font-bold tracking-wider text-slate-400">SYSTEM TELEMETRY</span>
+            </div>
+
+            <div className="space-y-3">
+              {/* CPU Usage */}
+              <div>
+                <div className="flex justify-between text-[10px] mb-1 font-mono text-slate-400">
+                  <span className="flex items-center gap-1"><Cpu className="w-3 h-3 text-slate-500" /> CPU LOAD</span>
+                  <span className={telemetry.cpu > 80 ? "text-rose-400 font-bold animate-pulse" : "text-emerald-400 font-bold"}>
+                    {telemetry.cpu}%
+                  </span>
+                </div>
+                <div className="w-full h-1.5 bg-slate-900 rounded overflow-hidden border border-slate-800">
+                  <motion.div
+                    className={`h-full ${telemetry.cpu > 80 ? "bg-rose-500" : "bg-emerald-400"}`}
+                    animate={{ width: `${telemetry.cpu}%` }}
+                    transition={{ duration: 0.5 }}
+                  />
+                </div>
               </div>
 
-              <select
-                value={sortBy}
-                onChange={e => setSortBy(e.target.value as any)}
-                className="bg-slate-900 border border-slate-800 rounded-xl text-[10px] font-mono text-slate-400 px-2 py-1.5 focus:outline-none"
-              >
-                <option value="dueDate">Sort: Due Date</option>
-                <option value="priority">Sort: Priority</option>
-                <option value="createdAt">Sort: Created Time</option>
-              </select>
+              {/* RAM Usage */}
+              <div>
+                <div className="flex justify-between text-[10px] mb-1 font-mono text-slate-400">
+                  <span className="flex items-center gap-1"><Layers className="w-3 h-3 text-slate-500" /> MEMORY LOAD</span>
+                  <span className="text-emerald-400 font-bold">{telemetry.ram}%</span>
+                </div>
+                <div className="w-full h-1.5 bg-slate-900 rounded overflow-hidden border border-slate-800">
+                  <motion.div
+                    className="h-full bg-emerald-400"
+                    animate={{ width: `${telemetry.ram}%` }}
+                    transition={{ duration: 0.5 }}
+                  />
+                </div>
+              </div>
+
+              {/* Volume & Brightness side by side */}
+              <div className="grid grid-cols-2 gap-3">
+                {/* Volume bar */}
+                <div>
+                  <div className="flex justify-between text-[10px] mb-1 font-mono text-slate-400">
+                    <span className="flex items-center gap-1"><Volume1 className="w-3 h-3 text-slate-500" /> VOLUME</span>
+                    <span className="text-emerald-400 font-mono">{telemetry.volume}%</span>
+                  </div>
+                  <div className="w-full h-1 bg-slate-900 rounded overflow-hidden border border-slate-850">
+                    <div className="h-full bg-emerald-400" style={{ width: `${telemetry.volume}%` }} />
+                  </div>
+                </div>
+
+                {/* Brightness bar */}
+                <div>
+                  <div className="flex justify-between text-[10px] mb-1 font-mono text-slate-400">
+                    <span className="flex items-center gap-1"><Sun className="w-3 h-3 text-slate-500" /> BRIGHTNESS</span>
+                    <span className="text-emerald-400 font-mono">
+                      {telemetry.brightness >= 0 ? `${telemetry.brightness}%` : "N/A"}
+                    </span>
+                  </div>
+                  <div className="w-full h-1 bg-slate-900 rounded overflow-hidden border border-slate-850">
+                    <div 
+                      className="h-full bg-emerald-400" 
+                      style={{ width: `${telemetry.brightness >= 0 ? telemetry.brightness : 0}%` }} 
+                    />
+                  </div>
+                </div>
+              </div>
+
+              {/* Battery & Disk telemetry */}
+              <div className="flex items-center justify-between text-[9px] text-slate-500 pt-1">
+                <span className="flex items-center gap-1">
+                  <Battery className="w-3.5 h-3.5" />
+                  BATT: <strong className="text-slate-300">{telemetry.batteryLevel}% {telemetry.charging ? "(CHARGING)" : ""}</strong>
+                </span>
+                <span className="flex items-center gap-1">
+                  <HardDrive className="w-3.5 h-3.5" />
+                  SYS DISK (C:): <strong className="text-slate-300">{telemetry.diskCapacity}% USED</strong>
+                </span>
+              </div>
+            </div>
+          </div>
+
+          {/* Widget: Voice Control Config & Diagnostics */}
+          <div className="bg-slate-950/60 border border-emerald-500/10 rounded-xl p-3.5">
+            <div className="flex items-center justify-between mb-2.5 border-b border-emerald-500/10 pb-1.5">
+              <div className="flex items-center gap-2">
+                <Mic className="w-3.5 h-3.5 text-emerald-400 animate-pulse" />
+                <span className="text-[10px] uppercase font-bold tracking-wider text-slate-400">VOICE CONTROL CONFIG</span>
+              </div>
+              <span className={`text-[8px] font-mono px-1 py-0.5 rounded uppercase border ${
+                speechEngineStatus === "listening" ? "bg-emerald-950/80 text-emerald-400 border-emerald-500/30 font-bold" :
+                speechEngineStatus === "ready" ? "bg-blue-950/80 text-blue-400 border-blue-500/30" :
+                speechEngineStatus === "initializing" ? "bg-amber-950/80 text-amber-400 border-amber-500/30 animate-pulse" :
+                "bg-slate-900/80 text-slate-500 border-slate-800"
+              }`}>
+                {speechEngineStatus}
+              </span>
             </div>
 
-            {/* Filter tabs */}
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-1 bg-[#090f1d] p-1 rounded-lg border border-slate-850">
-                {(["all", "pending", "completed"] as const).map(tab => (
+            <div className="space-y-2.5">
+              {/* Decoder mode selection */}
+              <div className="flex items-center justify-between text-[10px] font-mono">
+                <span className="text-slate-500">VOX DECODER</span>
+                <div className="flex bg-slate-900/60 rounded border border-slate-850 p-0.5">
                   <button
-                    key={tab}
-                    onClick={() => setStatusFilter(tab)}
-                    className={`px-3 py-1 rounded text-[10px] font-mono uppercase font-bold tracking-wider transition ${
-                      statusFilter === tab 
-                        ? "bg-emerald-950/60 text-emerald-450 border border-emerald-900/60" 
+                    onClick={() => {
+                      setSpeechEngineMode("local");
+                      addLog("Decoder switched to Native Offline voice matching loop.", "info");
+                      speak("Offline engine selected.");
+                    }}
+                    className={`px-2 py-0.5 rounded text-[8px] font-bold transition-all cursor-pointer ${
+                      speechEngineMode === "local"
+                        ? "bg-emerald-500/20 text-emerald-400 border border-emerald-500/30"
                         : "text-slate-500 hover:text-slate-300"
                     }`}
                   >
-                    {tab}
+                    OFFLINE LOCAL
                   </button>
-                ))}
+                  <button
+                    onClick={() => {
+                      setSpeechEngineMode("browser");
+                      addLog("Decoder switched to Browser Cloud dictation API.", "info");
+                      speak("Browser engine selected.");
+                    }}
+                    className={`px-2 py-0.5 rounded text-[8px] font-bold transition-all cursor-pointer ${
+                      speechEngineMode === "browser"
+                        ? "bg-emerald-500/20 text-emerald-400 border border-emerald-500/30"
+                        : "text-slate-500 hover:text-slate-300"
+                    }`}
+                  >
+                    BROWSER CLOUD
+                  </button>
+                </div>
               </div>
 
-              {/* Read Aloud All Pending Tasks Trigger */}
-              <button
-                onClick={() => processCommand("say tasks")}
-                className="flex items-center gap-1.5 px-3 py-1 rounded-lg bg-indigo-950/50 border border-indigo-900 hover:border-indigo-650 hover:bg-indigo-900/50 text-indigo-300 text-[10px] font-mono font-bold uppercase transition cursor-pointer"
-                title="Speak all tasks"
-              >
-                <Volume2 className="w-3.5 h-3.5" />
-                Read tasks aloud
-              </button>
+              {/* Status information & diagnostics */}
+              <div className="bg-slate-950/80 rounded border border-slate-900 p-2 font-mono text-[9px] leading-normal text-slate-400 space-y-1">
+                <div className="flex justify-between">
+                  <span className="text-slate-600">Local Service:</span>
+                  <span className={window.electronAPI ? "text-emerald-400" : "text-amber-500"}>
+                    {window.electronAPI ? "CONNECTED" : "REST BACKEND ONLY"}
+                  </span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-slate-600">Speech Feed:</span>
+                  <span>{speechEngineMode === "local" ? "Native .NET SAPI" : "Chrome WebSpeech"}</span>
+                </div>
+                {speechEngineMode === "local" && speechEngineError && (
+                  <div className="text-rose-450 border border-rose-950 bg-rose-950/15 px-1.5 py-1 rounded mt-1.5 break-words">
+                    <strong>Error:</strong> {speechEngineError}
+                  </div>
+                )}
+                {speechEngineMode === "local" && !speechEngineError && (
+                  <div className="text-emerald-500/80 text-[8px] flex items-center gap-1 mt-1.5">
+                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-ping" />
+                    Offline speech matching loop active. Zero network calls.
+                  </div>
+                )}
+                {speechEngineMode === "browser" && (
+                  <div className="text-blue-400/80 text-[8px] flex items-center gap-1 mt-1.5">
+                    <span className="w-1.5 h-1.5 rounded-full bg-blue-400 animate-pulse" />
+                    Cloud-backed Web Speech API enabled (requires internet).
+                  </div>
+                )}
+              </div>
             </div>
           </div>
 
-          {/* Task manual form drawer (collapsible/inline) */}
-          <div className="mb-4 bg-[#0a0f1d]/75 border border-slate-850/80 rounded-2xl p-3.5 shrink-0">
-            <span className="block text-[10px] uppercase font-bold tracking-widest text-slate-400 font-mono mb-2">
-              ➕ Add Task UI Form
-            </span>
-            <form onSubmit={handleManualAdd} className="grid grid-cols-1 md:grid-cols-12 gap-2 text-xs">
-              <div className="md:col-span-4">
-                <input
-                  type="text"
-                  placeholder="Task title *"
-                  value={manualTitle}
-                  onChange={e => setManualTitle(e.target.value)}
-                  className="w-full bg-[#06090f] border border-slate-800 rounded-lg px-2.5 py-1.5 text-slate-300 placeholder-slate-600 focus:outline-none focus:border-emerald-500"
-                  required
-                />
+          {/* Widget 2: Notepad Task Manager */}
+          <div className="bg-slate-950/60 border border-emerald-500/10 rounded-xl p-3.5 flex-1 flex flex-col min-h-[200px]">
+            <div className="flex items-center justify-between mb-3 border-b border-emerald-500/10 pb-1.5">
+              <div className="flex items-center gap-2">
+                <FileText className="w-3.5 h-3.5 text-indigo-400" />
+                <span className="text-[10px] uppercase font-bold tracking-wider text-slate-400">
+                  NOTEPAD TASKS (tasks.txt)
+                </span>
               </div>
-              <div className="md:col-span-3">
-                <select
-                  value={manualPriority}
-                  onChange={e => setManualPriority(e.target.value as any)}
-                  className="w-full bg-[#06090f] border border-slate-800 rounded-lg px-2 py-1.5 text-slate-400 focus:outline-none focus:border-emerald-500"
-                >
-                  <option value="low">Low Priority</option>
-                  <option value="medium">Medium Priority</option>
-                  <option value="high">High Priority</option>
-                  <option value="urgent">Urgent Priority</option>
-                </select>
-              </div>
-              <div className="md:col-span-3">
-                <input
-                  type="datetime-local"
-                  value={manualDueDate}
-                  onChange={e => setManualDueDate(e.target.value)}
-                  className="w-full bg-[#06090f] border border-slate-800 rounded-lg px-2 py-1 text-slate-400 focus:outline-none text-[11px]"
-                />
-              </div>
-              <div className="md:col-span-2">
+              <div className="flex items-center gap-1.5">
                 <button
-                  type="submit"
-                  className="w-full bg-emerald-950/80 hover:bg-emerald-900 border border-emerald-800 hover:border-emerald-500 text-emerald-300 font-mono uppercase tracking-wider font-bold py-1.5 rounded-lg transition cursor-pointer text-[10px]"
+                  onClick={loadTasks}
+                  className="p-1 rounded text-slate-500 hover:text-emerald-400 hover:bg-slate-900 transition-colors cursor-pointer"
+                  title="Reload Tasks"
                 >
-                  Create
+                  <RefreshCw className="w-3 h-3" />
+                </button>
+                <button
+                  onClick={openNotepadFile}
+                  className="flex items-center gap-1 px-1.5 py-0.5 rounded bg-indigo-500/10 text-indigo-400 border border-indigo-500/20 text-[9px] font-bold hover:bg-indigo-500/20 hover:text-indigo-300 transition-all cursor-pointer"
+                  title="Open text file in Notepad"
+                >
+                  <FolderOpen className="w-2.5 h-2.5" /> OPEN NOTEPAD
                 </button>
               </div>
+            </div>
+
+            {/* Task Item List with Wrap Word styles instead of truncate */}
+            <div className="flex-1 overflow-y-auto space-y-1.5 pr-1 text-xs max-h-[160px]">
+              {tasks.length === 0 ? (
+                <div className="text-slate-600 text-[10px] text-center py-6">
+                  No tasks loaded. Open in notepad to append tasks or write: "add task buy milk".
+                </div>
+              ) : (
+                tasks.map((task) => (
+                  <div
+                    key={task.id}
+                    className="flex items-start justify-between bg-slate-900/40 hover:bg-slate-900 border border-slate-900 hover:border-slate-800 rounded px-2 py-1.5 transition-all group animate-fade-in"
+                  >
+                    <div className="flex items-start gap-2 min-w-0 flex-1">
+                      <button
+                        onClick={() => toggleTask(task.id)}
+                        className={`text-slate-500 hover:text-emerald-400 transition-colors shrink-0 mt-0.5 cursor-pointer`}
+                      >
+                        {task.status === "completed" ? (
+                          <CheckSquare className="w-4 h-4 text-emerald-400 animate-pulse" />
+                        ) : (
+                          <Square className="w-4 h-4" />
+                        )}
+                      </button>
+                      
+                      <span className={`whitespace-normal break-words leading-relaxed text-left flex-1 ${task.status === "completed" ? "line-through text-slate-600" : "text-slate-300"}`}>
+                        <span className="text-slate-600 mr-1.5 font-bold">#{task.id}</span>
+                        {task.title}
+                      </span>
+                    </div>
+
+                    <button
+                      onClick={() => deleteTask(task.id)}
+                      className="text-slate-700 hover:text-rose-400 p-0.5 rounded opacity-0 group-hover:opacity-100 transition-opacity ml-1.5 cursor-pointer"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                ))
+              )}
+            </div>
+
+            {/* Add Task quick form */}
+            <form onSubmit={handleAddTask} className="flex items-center gap-1.5 mt-3 pt-3 border-t border-slate-900">
+              <input
+                type="text"
+                value={newTaskTitle}
+                onChange={(e) => setNewTaskTitle(e.target.value)}
+                placeholder="Append new task to file..."
+                className="flex-1 bg-slate-900/60 border border-slate-800 rounded px-2 py-1 text-[11px] text-slate-100 placeholder-slate-600 focus:outline-none focus:border-indigo-500/50 focus:ring-0"
+              />
+              <button
+                type="submit"
+                className="p-1 rounded bg-indigo-500/10 text-indigo-400 border border-indigo-500/20 hover:bg-indigo-500/20 transition-colors shrink-0 cursor-pointer"
+              >
+                <Plus className="w-3.5 h-3.5" />
+              </button>
             </form>
           </div>
 
-          {/* Scrollable Tasks Container */}
-          <div className="flex-1 overflow-y-auto space-y-2.5 pr-1.5 min-h-0">
-            {processedTasks.length === 0 ? (
-              <div className="h-48 flex flex-col items-center justify-center text-slate-650 italic text-xs font-mono text-center">
-                <ListTodo className="w-10 h-10 text-slate-800/80 mb-2 animate-pulse" />
-                <span>No tasks matching the current filters.</span>
-                <span className="text-[10px] text-slate-700 mt-1">Say "add task [task name]" to insert one.</span>
-              </div>
-            ) : (
-              processedTasks.map(task => {
-                const isOverdue = task.status !== "completed" && new Date(task.due_date) < new Date();
-                
-                // Color mapping for priorities
-                let priorityClass = "bg-slate-900/60 border-slate-800 text-slate-500";
-                if (task.priority === "urgent") priorityClass = "bg-rose-950/40 border-rose-900/60 text-rose-400";
-                else if (task.priority === "high") priorityClass = "bg-amber-950/40 border-amber-900/60 text-amber-400";
-                else if (task.priority === "medium") priorityClass = "bg-indigo-950/40 border-indigo-900/60 text-indigo-400";
-                else if (task.priority === "low") priorityClass = "bg-emerald-950/40 border-emerald-900/60 text-emerald-400";
+          {/* Widget 3: Terminal Macros (Power & System Controls) */}
+          <div className="bg-slate-950/60 border border-emerald-500/10 rounded-xl p-3">
+            <div className="flex items-center gap-2 mb-2 border-b border-emerald-500/10 pb-1">
+              <Power className="w-3.5 h-3.5 text-rose-400" />
+              <span className="text-[10px] uppercase font-bold tracking-wider text-slate-400">TERMINAL MACROS</span>
+            </div>
 
-                return (
-                  <div
-                    key={task.id}
-                    className={`flex items-start gap-3 p-3 bg-[#080d15]/60 border rounded-2xl transition-all duration-200 group ${
-                      task.status === "completed"
-                        ? "border-slate-900/80 bg-slate-950/20 opacity-60 scale-[0.99]"
-                        : isOverdue
-                        ? "border-rose-950/60 bg-rose-950/5"
-                        : "border-slate-800 hover:border-slate-700 hover:bg-[#0c1221]/50"
-                    }`}
-                  >
-                    {/* Circle Checkbox */}
-                    <button
-                      onClick={() => toggleTaskComplete(task.id)}
-                      className={`mt-0.5 w-5 h-5 rounded-full border flex items-center justify-center transition cursor-pointer shrink-0 ${
-                        task.status === "completed"
-                          ? "bg-indigo-950/80 border-indigo-500 text-indigo-400"
-                          : isOverdue
-                          ? "border-rose-800 hover:border-rose-600 bg-slate-950/40"
-                          : "border-slate-850 hover:border-slate-600 bg-slate-950/40 text-transparent hover:text-slate-500"
-                      }`}
-                      title={task.status === "completed" ? "Mark pending" : "Mark completed"}
-                    >
-                      <Check className="w-3.5 h-3.5" />
-                    </button>
-
-                    {/* Content */}
-                    <div className="flex-1 min-w-0">
-                      <div className="flex items-center gap-2 flex-wrap">
-                        <span className="font-mono text-[9px] text-slate-600 font-bold">
-                          #{task.id}
-                        </span>
-                        
-                        <h4 className={`text-xs font-semibold leading-snug truncate ${
-                          task.status === "completed" ? "text-slate-500 line-through font-normal" : "text-slate-200"
-                        }`}>
-                          {task.title}
-                        </h4>
-
-                        {/* Priority Badge */}
-                        <span className={`text-[8px] uppercase tracking-wider font-mono font-bold px-1.5 py-0.5 rounded border select-none shrink-0 ${priorityClass}`}>
-                          {task.priority}
-                        </span>
-                      </div>
-
-                      {task.description && (
-                        <p className={`text-[10px] mt-1 line-clamp-2 leading-relaxed ${
-                          task.status === "completed" ? "text-slate-650" : "text-slate-450"
-                        }`}>
-                          {task.description}
-                        </p>
-                      )}
-
-                      {/* Footer Info */}
-                      <div className="flex flex-wrap items-center gap-3.5 mt-2 text-[9px] font-mono text-slate-500">
-                        <span className="flex items-center gap-1 shrink-0">
-                          <Calendar className="w-3.5 h-3.5 text-slate-600" />
-                          Due: <span className={isOverdue ? "text-rose-450 font-bold" : "text-slate-400"}>
-                            {new Date(task.due_date).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}
-                          </span>
-                        </span>
-
-                        {task.status === "completed" && task.completed_at && (
-                          <span className="text-indigo-400 shrink-0 font-medium">
-                            Done: {new Date(task.completed_at).toLocaleDateString()}
-                          </span>
-                        )}
-
-                        {isOverdue && (
-                          <span className="text-rose-450 font-bold flex items-center gap-0.5 uppercase tracking-wider text-[8px] border border-rose-950 bg-rose-950/20 px-1 rounded select-none shrink-0">
-                            <AlertCircle className="w-2.5 h-2.5 animate-pulse" /> OVERDUE
-                          </span>
-                        )}
-                      </div>
-                    </div>
-
-                    {/* Quick action buttons on hover */}
-                    <div className="flex items-center gap-1.5 opacity-0 group-hover:opacity-100 transition duration-150 shrink-0 self-center">
-                      
-                      {/* Speak this single task */}
-                      <button
-                        onClick={() => speakSingleTask(task)}
-                        className="p-1.5 rounded-lg bg-slate-900 border border-slate-800 hover:border-indigo-700 text-slate-450 hover:text-indigo-400 cursor-pointer transition"
-                        title="Read task info aloud"
-                      >
-                        <Volume2 className="w-3.5 h-3.5" />
-                      </button>
-
-                      {/* Delete button */}
-                      <button
-                        onClick={() => deleteTask(task.id)}
-                        className="p-1.5 rounded-lg bg-slate-900 border border-slate-800 hover:border-rose-900 text-slate-450 hover:text-rose-450 cursor-pointer transition"
-                        title="Delete task permanently"
-                      >
-                        <Trash2 className="w-3.5 h-3.5" />
-                      </button>
-                    </div>
-
-                  </div>
-                );
-              })
-            )}
+            <div className="grid grid-cols-5 gap-1.5 text-[9px] font-bold text-center">
+              <button
+                onClick={() => handleCommand("lock pc")}
+                className="py-1 rounded bg-slate-900 text-slate-400 hover:bg-amber-950/40 hover:text-amber-400 border border-slate-850 hover:border-amber-500/30 transition-all flex flex-col items-center justify-center gap-0.5 cursor-pointer"
+              >
+                <Lock className="w-3 h-3" /> LOCK
+              </button>
+              <button
+                onClick={() => handleCommand("sleep pc")}
+                className="py-1 rounded bg-slate-900 text-slate-400 hover:bg-indigo-950/40 hover:text-indigo-400 border border-slate-850 hover:border-indigo-500/30 transition-all flex flex-col items-center justify-center gap-0.5 cursor-pointer"
+              >
+                <Moon className="w-3 h-3" /> SLEEP
+              </button>
+              <button
+                onClick={() => handleCommand("shutdown pc")}
+                className="py-1 rounded bg-slate-900 text-slate-400 hover:bg-rose-950/40 hover:text-rose-400 border border-slate-850 hover:border-rose-500/30 transition-all flex flex-col items-center justify-center gap-0.5 cursor-pointer"
+              >
+                <Power className="w-3 h-3" /> SHUT
+              </button>
+              <button
+                onClick={() => handleCommand("restart pc")}
+                className="py-1 rounded bg-slate-900 text-slate-400 hover:bg-amber-950/40 hover:text-amber-400 border border-slate-850 hover:border-amber-500/30 transition-all flex flex-col items-center justify-center gap-0.5 cursor-pointer"
+              >
+                <RefreshCw className="w-3 h-3" /> RESTART
+              </button>
+              <button
+                onClick={() => handleCommand("abort shutdown")}
+                className="py-1 rounded bg-slate-900 text-rose-400 hover:bg-emerald-950/40 hover:text-emerald-400 border border-rose-500/20 hover:border-emerald-500/30 transition-all flex flex-col items-center justify-center gap-0.5 cursor-pointer"
+              >
+                <X className="w-3 h-3" /> CANCEL
+              </button>
+            </div>
           </div>
-
-        </section>
+        </div>
 
       </div>
 
+      {/* Cyberpunk grid bottom frame overlay lines */}
+      <div className="absolute bottom-0 inset-x-0 h-1 bg-gradient-to-r from-emerald-500/50 via-indigo-500/50 to-emerald-500/50 opacity-40 pointer-events-none" />
     </div>
   );
 };

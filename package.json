@@ -3,10 +3,12 @@
   "private": true,
   "version": "0.0.0",
   "type": "module",
+  "main": "main.cjs",
   "scripts": {
     "dev": "vite --port=3000 --host=0.0.0.0",
     "server": "tsx server.ts",
-    "start": "npm run build && electron .",
+    "start": "npm run build && start chrome --app=http://localhost:3001 && tsx server.ts",
+    "electron": "npm run build && electron .",
     "build": "vite build",
     "preview": "vite preview",
     "clean": "rm -rf dist server.js",

@@ -1,9 +1,10 @@
 import express from "express";
-import { exec } from "child_process";
+import { exec, spawn } from "child_process";
 import { promisify } from "util";
 import path from "path";
 import dotenv from "dotenv";
 import { fileURLToPath } from "url";
+import fs from "fs";
 
 dotenv.config();
 
@@ -31,6 +32,14 @@ app.get("/api/system/stats", async (req, res) => {
   try {
     const rawResult = await runPowerShellAction("GetStats");
     const parsed = JSON.parse(rawResult);
+    
+    // Fetch volume and brightness in the same polling call
+    const volStr = await runPowerShellAction("GetVolume");
+    const brightStr = await runPowerShellAction("GetBrightness");
+    
+    parsed.volume = parseFloat(volStr);
+    parsed.brightness = parseInt(brightStr, 10);
+    
     res.json(parsed);
   } catch (error: any) {
     console.error("Error fetching system stats:", error.message);
@@ -143,19 +152,32 @@ app.post("/api/hardware/open", async (req, res) => {
   }
 });
 
-// 7. System Shutdown / Abort
+// 7. System Power Controls (Shutdown, Restart, Abort, Lock, Sleep)
 app.post("/api/system/shutdown", async (req, res) => {
-  const { abort } = req.body;
+  const { action } = req.body;
   
   try {
-    let cmd = "shutdown /s /t 5"; // Shutdown in 5 seconds (matching UI timer trigger)
-    if (abort) {
-      cmd = "shutdown /a"; // Abort shutdown
+    let command = "";
+    if (action === "shutdown") {
+      command = "shutdown /s /t 15";
+    } else if (action === "restart") {
+      command = "shutdown /r /t 15";
+    } else if (action === "abort") {
+      command = "shutdown /a";
+    } else if (action === "lock") {
+      command = "rundll32.exe user32.dll,LockWorkStation";
+    } else if (action === "sleep") {
+      command = `powershell -Command "Add-Type -Assembly System.Windows.Forms; [System.Windows.Forms.Application]::SetSuspendState('Suspend', $false, $false)"`;
+    } else {
+      return res.status(400).json({ error: "Invalid power action" });
     }
     
-    await execAsync(cmd);
-    res.json({ success: true, message: abort ? "Shutdown sequence aborted" : "Shutdown sequence initiated" });
+    await execAsync(command);
+    res.json({ success: true, action });
   } catch (error: any) {
+    if (action === "abort") {
+      return res.json({ success: true, action });
+    }
     console.error("Error in shutdown control:", error.message);
     res.status(500).json({ error: "Failed to run shutdown control", details: error.message });
   }
@@ -181,6 +203,65 @@ app.post("/api/media/command", async (req, res) => {
   }
 });
 
+// 9. Tasks API (tasks.txt)
+const tasksFilePath = path.join(process.env.USERPROFILE || "C:\\", "tasks.txt");
+
+app.get("/api/tasks", (req, res) => {
+  try {
+    if (!fs.existsSync(tasksFilePath)) {
+      return res.json([]);
+    }
+    const rawText = fs.readFileSync(tasksFilePath, "utf-8");
+    const lines = rawText.split(/\r?\n/);
+    const parsedTasks = [];
+    let currentId = 1;
+    for (const line of lines) {
+      if (!line.trim()) continue;
+      let status = "pending";
+      let title = line;
+      const isCompleted = line.match(/^\[[xX]\]\s*(.*)$/);
+      const isPending = line.match(/^\[\s*\]\s*(.*)$/);
+      if (isCompleted) {
+        status = "completed";
+        title = isCompleted[1].trim();
+      } else if (isPending) {
+        status = "pending";
+        title = isPending[1].trim();
+      }
+      parsedTasks.push({
+        id: currentId++,
+        title,
+        status,
+        created_at: new Date().toISOString()
+      });
+    }
+    res.json(parsedTasks);
+  } catch (err: any) {
+    res.status(500).json({ error: "Failed to read tasks", details: err.message });
+  }
+});
+
+app.post("/api/tasks", (req, res) => {
+  const { tasks } = req.body;
+  try {
+    const fileLines = tasks.map((t: any) => {
+      const marker = t.status === "completed" ? "[x]" : "[ ]";
+      return `${marker} ${t.title}`;
+    });
+    fs.writeFileSync(tasksFilePath, fileLines.join("\n"), "utf-8");
+    res.json({ success: true });
+  } catch (err: any) {
+    res.status(500).json({ error: "Failed to write tasks", details: err.message });
+  }
+});
+
+app.post("/api/tasks/open", (req, res) => {
+  exec(`notepad.exe "${tasksFilePath}"`, (err) => {
+    if (err) console.error("Error opening notepad:", err);
+  });
+  res.json({ success: true });
+});
+
 // Serve frontend build static files in production
 const distPath = path.join(__dirname, "dist");
 app.use(express.static(distPath));
@@ -197,6 +278,154 @@ app.get("*", (req, res, next) => {
     }
   });
 });
+
+// Background Speech Engine management
+let speechProcess: any = null;
+let speechReady = false;
+let speechListening = false;
+let sseClients: any[] = [];
+let speechEngineError: string | null = null;
+
+function startBackgroundSpeechEngine() {
+  if (process.platform !== "win32") {
+    console.log("Speech Engine only supported on Windows.");
+    return;
+  }
+  
+  console.log("Initializing persistent background Speech Recognition engine...");
+  const command = "powershell";
+  const args = ["-ExecutionPolicy", "Bypass", "-File", scriptPath, "-Action", "StartSpeechEngine"];
+  
+  try {
+    speechProcess = spawn(command, args);
+    speechEngineError = null;
+    
+    speechProcess.stdout.on("data", (data: Buffer) => {
+      const output = data.toString().trim();
+      const lines = output.split(/\r?\n/);
+      
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed) continue;
+        console.log(`[SpeechEngine STDOUT]: ${trimmed}`);
+        
+        if (trimmed === "READY") {
+          speechReady = true;
+          broadcastToClients({ type: "status", status: "ready" });
+        } else if (trimmed === "LISTENING") {
+          speechListening = true;
+          broadcastToClients({ type: "status", status: "listening" });
+        } else if (trimmed === "STOPPED") {
+          speechListening = false;
+          broadcastToClients({ type: "status", status: "stopped" });
+        } else if (trimmed.startsWith("RECOGNIZED:")) {
+          const text = trimmed.substring("RECOGNIZED:".length).trim();
+          broadcastToClients({ type: "recognized", text });
+        } else if (trimmed === "REJECTED") {
+          broadcastToClients({ type: "rejected" });
+        } else if (trimmed.startsWith("FATAL_ERROR:")) {
+          const errMsg = trimmed.substring("FATAL_ERROR:".length).trim();
+          speechEngineError = errMsg;
+          broadcastToClients({ type: "error", message: errMsg });
+        }
+      }
+    });
+    
+    speechProcess.stderr.on("data", (data: Buffer) => {
+      const errOut = data.toString().trim();
+      console.error(`[SpeechEngine STDERR]: ${errOut}`);
+    });
+    
+    speechProcess.on("close", (code: number) => {
+      console.log(`Speech engine process exited with code ${code}`);
+      speechReady = false;
+      speechListening = false;
+      
+      // Auto-restart after 5 seconds if not closed intentionally
+      if (code !== 0) {
+        setTimeout(startBackgroundSpeechEngine, 5000);
+      }
+    });
+  } catch (err: any) {
+    console.error("Failed to spawn background speech engine process:", err.message);
+    speechEngineError = err.message;
+  }
+}
+
+function broadcastToClients(data: any) {
+  const msg = `data: ${JSON.stringify(data)}\n\n`;
+  sseClients.forEach((res) => {
+    try {
+      res.write(msg);
+    } catch (err) {
+      // client disconnected
+    }
+  });
+}
+
+// Clean termination on server shutdown
+process.on("exit", () => {
+  if (speechProcess) {
+    speechProcess.stdin.write("EXIT\n");
+    speechProcess.kill();
+  }
+});
+process.on("SIGINT", () => {
+  if (speechProcess) {
+    speechProcess.stdin.write("EXIT\n");
+    speechProcess.kill();
+  }
+  process.exit();
+});
+
+// SSE Speech recognition endpoint
+app.get("/api/speech/events", (req, res) => {
+  res.setHeader("Content-Type", "text/event-stream");
+  res.setHeader("Cache-Control", "no-cache");
+  res.setHeader("Connection", "keep-alive");
+  res.flushHeaders();
+  
+  sseClients.push(res);
+  
+  // Send initial state
+  res.write(`data: ${JSON.stringify({ 
+    type: "status", 
+    status: speechListening ? "listening" : (speechReady ? "ready" : "initializing"),
+    error: speechEngineError
+  })}\n\n`);
+  
+  req.on("close", () => {
+    sseClients = sseClients.filter((c) => c !== res);
+  });
+});
+
+app.get("/api/speech/status", (req, res) => {
+  res.json({
+    status: speechListening ? "listening" : (speechReady ? "ready" : "initializing"),
+    error: speechEngineError
+  });
+});
+
+app.post("/api/speech/start", (req, res) => {
+  if (speechProcess && speechReady) {
+    speechProcess.stdin.write("START\n");
+    res.json({ success: true });
+  } else {
+    res.status(503).json({ error: "Speech engine not ready.", details: speechEngineError });
+  }
+});
+
+app.post("/api/speech/stop", (req, res) => {
+  if (speechProcess && speechReady) {
+    speechProcess.stdin.write("STOP\n");
+    res.json({ success: true });
+  } else {
+    res.status(503).json({ error: "Speech engine not ready." });
+  }
+});
+
+// Start the engine
+startBackgroundSpeechEngine();
 
 app.listen(PORT, () => {
   console.log(`Backend hardware management server executing on http://localhost:${PORT}`);
