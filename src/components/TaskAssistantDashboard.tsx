@@ -322,6 +322,13 @@ export const TaskAssistantDashboard: React.FC = () => {
   const [speechEngineStatus, setSpeechEngineStatus] = useState<string>("initializing");
   const [speechEngineError, setSpeechEngineError] = useState<string | null>(null);
 
+  // Premium voice states
+  const [voices, setVoices] = useState<SpeechSynthesisVoice[]>([]);
+  const [selectedVoiceName, setSelectedVoiceName] = useState<string>(localStorage.getItem("vp_voice") || "");
+
+  // Mechanical UI SFX state
+  const [sfxEnabled, setSfxEnabled] = useState<boolean>(localStorage.getItem("vp_sfx_enabled") !== "false");
+
   // Audio visualizer state
   const [micVolumeLevel, setMicVolumeLevel] = useState(0);
   const audioContextRef = useRef<AudioContext | null>(null);
@@ -347,6 +354,122 @@ export const TaskAssistantDashboard: React.FC = () => {
   const logsEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const recognitionRef = useRef<any>(null);
+
+  // Load premium offline SAPI voices on mount
+  useEffect(() => {
+    if (typeof window !== "undefined" && window.speechSynthesis) {
+      const updateVoices = () => {
+        const availableVoices = window.speechSynthesis.getVoices();
+        setVoices(availableVoices);
+        
+        // Auto-select Microsoft Hazel Desktop if available as a high-quality voice
+        if (!localStorage.getItem("vp_voice")) {
+          const hazel = availableVoices.find(v => v.name.includes("Hazel") || v.name.includes("Hazel Desktop"));
+          if (hazel) {
+            setSelectedVoiceName(hazel.name);
+            localStorage.setItem("vp_voice", hazel.name);
+          } else {
+            const defaultVoice = availableVoices.find(v => v.lang.startsWith("en")) || availableVoices[0];
+            if (defaultVoice) {
+              setSelectedVoiceName(defaultVoice.name);
+              localStorage.setItem("vp_voice", defaultVoice.name);
+            }
+          }
+        }
+      };
+      updateVoices();
+      window.speechSynthesis.onvoiceschanged = updateVoices;
+    }
+  }, []);
+
+  // Mechanical UI Sound Design (SFX) using Web Audio API
+  const playSFX = (type: "click" | "confirm" | "error" | "start_listening" | "stop_listening") => {
+    if (!sfxEnabled) return;
+    if (typeof window === "undefined") return;
+
+    try {
+      const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
+      if (!AudioContextClass) return;
+      const ctx = new AudioContextClass();
+
+      if (type === "click") {
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.type = "sine";
+        osc.frequency.setValueAtTime(1000, ctx.currentTime);
+        osc.frequency.exponentialRampToValueAtTime(1200, ctx.currentTime + 0.03);
+        gain.gain.setValueAtTime(0.04, ctx.currentTime);
+        gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.03);
+        osc.connect(gain);
+        gain.connect(ctx.destination);
+        osc.start();
+        osc.stop(ctx.currentTime + 0.03);
+      } else if (type === "confirm") {
+        const osc1 = ctx.createOscillator();
+        const gain1 = ctx.createGain();
+        osc1.type = "triangle";
+        osc1.frequency.setValueAtTime(800, ctx.currentTime);
+        osc1.frequency.setValueAtTime(1100, ctx.currentTime + 0.07);
+        gain1.gain.setValueAtTime(0.06, ctx.currentTime);
+        gain1.gain.setValueAtTime(0.06, ctx.currentTime + 0.07);
+        gain1.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.22);
+        osc1.connect(gain1);
+        gain1.connect(ctx.destination);
+        osc1.start();
+        osc1.stop(ctx.currentTime + 0.22);
+      } else if (type === "error") {
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.type = "sawtooth";
+        osc.frequency.setValueAtTime(160, ctx.currentTime);
+        osc.frequency.linearRampToValueAtTime(70, ctx.currentTime + 0.25);
+        gain.gain.setValueAtTime(0.05, ctx.currentTime);
+        gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.25);
+        osc.connect(gain);
+        gain.connect(ctx.destination);
+        osc.start();
+        osc.stop(ctx.currentTime + 0.25);
+      } else if (type === "start_listening") {
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.type = "sine";
+        osc.frequency.setValueAtTime(550, ctx.currentTime);
+        osc.frequency.exponentialRampToValueAtTime(950, ctx.currentTime + 0.15);
+        gain.gain.setValueAtTime(0.06, ctx.currentTime);
+        gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.18);
+        osc.connect(gain);
+        gain.connect(ctx.destination);
+        osc.start();
+        osc.stop(ctx.currentTime + 0.18);
+      } else if (type === "stop_listening") {
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.type = "sine";
+        osc.frequency.setValueAtTime(950, ctx.currentTime);
+        osc.frequency.exponentialRampToValueAtTime(450, ctx.currentTime + 0.15);
+        gain.gain.setValueAtTime(0.06, ctx.currentTime);
+        gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.2);
+        osc.connect(gain);
+        gain.connect(ctx.destination);
+        osc.start();
+        osc.stop(ctx.currentTime + 0.2);
+      }
+    } catch (e) {
+      console.error("Web Audio SFX error:", e);
+    }
+  };
+
+  const toggleSFX = () => {
+    const nextVal = !sfxEnabled;
+    setSfxEnabled(nextVal);
+    localStorage.setItem("vp_sfx_enabled", String(nextVal));
+    addLog(`Mechanical SFX feedback ${nextVal ? "ENABLED" : "DISABLED"}.`, "info");
+    if (nextVal) {
+      setTimeout(() => {
+        playSFX("click");
+      }, 50);
+    }
+  };
 
   // 1. Initialize stats/tasks on mount
   useEffect(() => {
@@ -527,8 +650,10 @@ export const TaskAssistantDashboard: React.FC = () => {
 
     window.speechSynthesis.cancel();
     const utterance = new SpeechSynthesisUtterance(text);
-    const voices = window.speechSynthesis.getVoices();
-    const selectedVoice = voices.find((v) => v.lang.startsWith("en")) || voices[0];
+    const availableVoices = window.speechSynthesis.getVoices();
+    const selectedVoice = availableVoices.find((v) => v.name === selectedVoiceName) || 
+                          availableVoices.find((v) => v.lang.startsWith("en")) || 
+                          availableVoices[0];
     if (selectedVoice) {
       utterance.voice = selectedVoice;
     }
@@ -568,23 +693,27 @@ export const TaskAssistantDashboard: React.FC = () => {
       if (!window.electronAPI) {
         addLog("Local speech interface not available.", "error");
         stopAudioAnalyzer();
+        playSFX("error");
         return;
       }
       
       addLog("Starting offline voice engine (native)...", "info");
       setIsListening(true);
+      playSFX("start_listening");
       
       const res = await window.electronAPI.startSpeech();
       if (res && res.error) {
         addLog(`Offline Speech Engine failed to start: ${res.error}. Details: ${res.details || ""}`, "error");
         setIsListening(false);
         stopAudioAnalyzer();
+        playSFX("error");
       }
     } else {
       // Use Chrome Browser Cloud Speech Recognition Engine
       if (!SpeechRecognition) {
         addLog("Speech recognition not supported in this browser. Please use Google Chrome.", "error");
         stopAudioAnalyzer();
+        playSFX("error");
         return;
       }
 
@@ -598,12 +727,14 @@ export const TaskAssistantDashboard: React.FC = () => {
         recognition.onstart = () => {
           setIsListening(true);
           addLog("Voice engine listening (cloud)...", "info");
+          playSFX("start_listening");
         };
 
         recognition.onerror = (e: any) => {
           console.error("Speech Recognition Error:", e);
           setIsListening(false);
           stopAudioAnalyzer();
+          playSFX("error");
           
           if (e.error === "network") {
             addLog("Voice engine error: network. Note: Standalone Electron windows block Google Speech recognition. Please use 'Offline Local' mode for 100% private voice control.", "error");
@@ -616,11 +747,13 @@ export const TaskAssistantDashboard: React.FC = () => {
         recognition.onend = () => {
           setIsListening(false);
           stopAudioAnalyzer();
+          playSFX("stop_listening");
         };
 
         recognition.onresult = (event: any) => {
           const transcript = event.results[0][0].transcript;
           addLog(`User spoken: "${transcript}"`, "input");
+          playSFX("confirm");
           handleCommand(transcript);
         };
 
@@ -630,6 +763,7 @@ export const TaskAssistantDashboard: React.FC = () => {
         addLog(`Speech Recognition failed: ${err.message}`, "error");
         setIsListening(false);
         stopAudioAnalyzer();
+        playSFX("error");
       }
     }
   };
@@ -638,11 +772,13 @@ export const TaskAssistantDashboard: React.FC = () => {
     if (speechEngineMode === "local") {
       if (window.electronAPI) {
         await window.electronAPI.stopSpeech();
+        playSFX("stop_listening");
       }
     } else {
       if (recognitionRef.current) {
         recognitionRef.current.stop();
         recognitionRef.current = null;
+        playSFX("stop_listening");
       }
     }
     setIsListening(false);
@@ -678,6 +814,15 @@ export const TaskAssistantDashboard: React.FC = () => {
     await saveTasks(updated);
     addLog(`Task appended to tasks.txt: "${newTask.title}"`, "success");
     speak(`Added task ${newTask.title}`);
+    playSFX("confirm");
+    
+    // Trigger native toast notification
+    fetch("/api/notifications/toast", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ title: "Task Appended", message: newTask.title })
+    }).catch(() => {});
+    
     setNewTaskTitle("");
   };
 
@@ -686,6 +831,15 @@ export const TaskAssistantDashboard: React.FC = () => {
       if (t.id === id) {
         const nextStatus = t.status === "completed" ? "pending" : "completed";
         speak(`Task marked as ${nextStatus}`);
+        playSFX("confirm");
+        
+        // Trigger native toast notification
+        fetch("/api/notifications/toast", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ title: "Task Status Updated", message: `[#${t.id}] marked as ${nextStatus}` })
+        }).catch(() => {});
+
         return { ...t, status: nextStatus as "pending" | "completed" };
       }
       return t;
@@ -701,6 +855,14 @@ export const TaskAssistantDashboard: React.FC = () => {
     if (target) {
       addLog(`Deleted task: "${target.title}"`, "warning");
       speak(`Removed task ${target.title}`);
+      playSFX("click");
+      
+      // Trigger native toast notification
+      fetch("/api/notifications/toast", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ title: "Task Deleted", message: target.title })
+      }).catch(() => {});
     }
   };
 
@@ -1135,24 +1297,36 @@ export const TaskAssistantDashboard: React.FC = () => {
       }
     }).catch(() => {});
 
+    let lastStatus = "initializing";
     const unsubStatus = window.electronAPI.onSpeechStatus((data: any) => {
       if (data && data.status) {
         setSpeechEngineStatus(data.status);
+        if (data.status !== lastStatus) {
+          if (data.status === "listening") {
+            playSFX("start_listening");
+          } else if (data.status === "stopped" && lastStatus === "listening") {
+            playSFX("stop_listening");
+          }
+          lastStatus = data.status;
+        }
       }
     });
 
     const unsubRecognized = window.electronAPI.onSpeechRecognized((text: string) => {
       addLog(`User spoken (offline): "${text}"`, "input");
+      playSFX("confirm");
       handleCommand(text);
     });
 
     const unsubRejected = window.electronAPI.onSpeechRejected(() => {
       addLog("Speech rejected: command not recognized.", "warning");
+      playSFX("error");
     });
 
     const unsubError = window.electronAPI.onSpeechError((err: string) => {
       setSpeechEngineError(err);
       addLog(`Voice engine error: ${err}`, "error");
+      playSFX("error");
     });
 
     return () => {
@@ -1375,6 +1549,7 @@ export const TaskAssistantDashboard: React.FC = () => {
                 type="text"
                 value={inputCommand}
                 onChange={(e) => setInputCommand(e.target.value)}
+                onKeyDown={() => playSFX("click")}
                 placeholder="Enter command or tap the mic orb..."
                 className="w-full bg-transparent border-none outline-none font-mono text-xs text-slate-100 placeholder-slate-600 focus:ring-0 p-0"
                 autoFocus
@@ -1535,6 +1710,51 @@ export const TaskAssistantDashboard: React.FC = () => {
                 </div>
               </div>
 
+              {/* Voice accent selection */}
+              {voices.length > 0 && (
+                <div className="flex items-center justify-between text-[10px] font-mono">
+                  <span className="text-slate-500">VOX ACCENT (TTS)</span>
+                  <select
+                    value={selectedVoiceName}
+                    onChange={(e) => {
+                      const vName = e.target.value;
+                      setSelectedVoiceName(vName);
+                      localStorage.setItem("vp_voice", vName);
+                      playSFX("click");
+                      setTimeout(() => {
+                        window.speechSynthesis.cancel();
+                        const utterance = new SpeechSynthesisUtterance("Accent engine updated.");
+                        const found = window.speechSynthesis.getVoices().find(v => v.name === vName);
+                        if (found) utterance.voice = found;
+                        window.speechSynthesis.speak(utterance);
+                      }, 150);
+                    }}
+                    className="bg-slate-900 border border-slate-850 rounded px-1.5 py-0.5 text-[9px] text-emerald-400 font-mono focus:outline-none max-w-[150px]"
+                  >
+                    {voices.map((v) => (
+                      <option key={v.name} value={v.name} className="bg-slate-950 text-slate-200">
+                        {v.name.replace("Microsoft ", "").replace(" Desktop", "")}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
+
+              {/* SFX Feedback toggle */}
+              <div className="flex items-center justify-between text-[10px] font-mono">
+                <span className="text-slate-500">SFX FEEDBACK</span>
+                <button
+                  onClick={toggleSFX}
+                  className={`px-2 py-0.5 rounded text-[8px] font-bold transition-all border cursor-pointer ${
+                    sfxEnabled
+                      ? "bg-indigo-500/20 text-indigo-400 border-indigo-500/30"
+                      : "bg-slate-900/40 text-slate-600 border-slate-800"
+                  }`}
+                >
+                  {sfxEnabled ? "ACTIVE" : "MUTED"}
+                </button>
+              </div>
+
               {/* Status information & diagnostics */}
               <div className="bg-slate-950/80 rounded border border-slate-900 p-2 font-mono text-[9px] leading-normal text-slate-400 space-y-1">
                 <div className="flex justify-between">
@@ -1642,6 +1862,7 @@ export const TaskAssistantDashboard: React.FC = () => {
                 type="text"
                 value={newTaskTitle}
                 onChange={(e) => setNewTaskTitle(e.target.value)}
+                onKeyDown={() => playSFX("click")}
                 placeholder="Append new task to file..."
                 className="flex-1 bg-slate-900/60 border border-slate-800 rounded px-2 py-1 text-[11px] text-slate-100 placeholder-slate-600 focus:outline-none focus:border-indigo-500/50 focus:ring-0"
               />

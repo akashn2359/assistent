@@ -159,14 +159,19 @@ app.post("/api/system/shutdown", async (req, res) => {
   try {
     let command = "";
     if (action === "shutdown") {
+      await showToastNotification("System Shutdown Initiated", "Shutdown sequence scheduled in 15 seconds.");
       command = "shutdown /s /t 15";
     } else if (action === "restart") {
+      await showToastNotification("System Restart Initiated", "Restart sequence scheduled in 15 seconds.");
       command = "shutdown /r /t 15";
     } else if (action === "abort") {
+      await showToastNotification("Shutdown Aborted", "All scheduled power sequences cancelled.");
       command = "shutdown /a";
     } else if (action === "lock") {
+      await showToastNotification("System Locked", "Workstation locked by user request.");
       command = "rundll32.exe user32.dll,LockWorkStation";
     } else if (action === "sleep") {
+      await showToastNotification("System Entering Sleep", "Putting workstation to sleep.");
       command = `powershell -Command "Add-Type -Assembly System.Windows.Forms; [System.Windows.Forms.Application]::SetSuspendState('Suspend', $false, $false)"`;
     } else {
       return res.status(400).json({ error: "Invalid power action" });
@@ -265,6 +270,45 @@ app.post("/api/tasks", (req, res) => {
     res.json({ success: true });
   } catch (err: any) {
     res.status(500).json({ error: "Failed to write tasks", details: err.message });
+  }
+});
+
+// Helper function to send native Windows Toast Notifications via PowerShell WinRT
+async function showToastNotification(title: string, message: string) {
+  const escapedTitle = title.replace(/'/g, "''").replace(/"/g, '\\"');
+  const escapedMessage = message.replace(/'/g, "''").replace(/"/g, '\\"');
+  
+  const psCommand = `
+    [Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] | Out-Null;
+    [Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom.XmlDocument, ContentType = WindowsRuntime] | Out-Null;
+    $xml = [Windows.UI.Notifications.ToastNotificationManager]::GetTemplateContent([Windows.UI.Notifications.ToastTemplateType]::ToastText02);
+    $textNodes = $xml.GetElementsByTagName('text');
+    $textNodes.Item(0).AppendChild($xml.CreateTextNode('${escapedTitle}')) | Out-Null;
+    $textNodes.Item(1).AppendChild($xml.CreateTextNode('${escapedMessage}')) | Out-Null;
+    $toast = New-Object Windows.UI.Notifications.ToastNotification -ArgumentList $xml;
+    $notifier = [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('Microsoft.Windows.Shell.RunDialog');
+    $notifier.Show($toast);
+  `.replace(/\s+/g, ' ').trim();
+
+  try {
+    const execPromise = promisify(exec);
+    await execPromise(`powershell -Command "${psCommand}"`);
+  } catch (err: any) {
+    console.error("Failed to show toast notification:", err.message);
+  }
+}
+
+app.post("/api/notifications/toast", async (req, res) => {
+  const { title, message } = req.body;
+  if (!title || !message) {
+    return res.status(400).json({ error: "Title and message are required" });
+  }
+  
+  try {
+    await showToastNotification(title, message);
+    res.json({ success: true });
+  } catch (error: any) {
+    res.status(500).json({ error: "Failed to send toast notification", details: error.message });
   }
 });
 
@@ -369,6 +413,7 @@ app.post("/api/agent/command", async (req, res) => {
             tasks.push({ id: newId, title: action.title, status: "pending", created_at: new Date().toISOString() });
             saveTasksToFile(tasks);
             executionLogs.push(`Added task: "${action.title}"`);
+            showToastNotification("Task Appended", `[#${newId}] ${action.title}`);
           } else if (action.type === "task_complete") {
             const tasks = getTasksFromFile();
             const target = tasks.find((t: any) => t.id === action.id || (action.query && t.title.toLowerCase().includes(action.query.toLowerCase())));
@@ -376,6 +421,7 @@ app.post("/api/agent/command", async (req, res) => {
               target.status = "completed";
               saveTasksToFile(tasks);
               executionLogs.push(`Completed task: "${target.title}"`);
+              showToastNotification("Task Completed", target.title);
             }
           } else if (action.type === "task_delete") {
             let tasks = getTasksFromFile();
@@ -384,6 +430,7 @@ app.post("/api/agent/command", async (req, res) => {
               tasks = tasks.filter((t: any) => t.id !== target.id);
               saveTasksToFile(tasks);
               executionLogs.push(`Deleted task: "${target.title}"`);
+              showToastNotification("Task Deleted", target.title);
             }
           } else if (action.type === "shell") {
             console.log(`[AI Agent Execution]: Running Shell Command: "${action.command}"`);
