@@ -57,6 +57,7 @@ declare global {
       onSpeechRecognized: (callback: (text: string) => void) => () => void;
       onSpeechRejected: (callback: () => void) => () => void;
       onSpeechError: (callback: (error: string) => void) => () => void;
+      agentCommand: (command: string) => Promise<{ success: boolean; output: string; commandExecuted?: string }>;
     };
   }
 }
@@ -253,6 +254,19 @@ if (typeof window !== "undefined" && !navigator.userAgent.toLowerCase().includes
       return () => {
         errorListeners.delete(callback);
       };
+    },
+    agentCommand: async (command: string) => {
+      try {
+        const res = await fetch("/api/agent/command", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ command })
+        });
+        if (res.ok) return await res.json();
+        throw new Error("REST API response failed");
+      } catch (err: any) {
+        return { success: false, output: err.message };
+      }
     }
   };
 }
@@ -1049,10 +1063,49 @@ export const TaskAssistantDashboard: React.FC = () => {
       return;
     }
 
-    // fallback when offline command doesn't match
-    const fallbackMsg = `Instruction not recognized: "${normalizedCmd}". Type 'help' to list valid offline system commands.`;
-    addLog(fallbackMsg, "warning");
-    speak("Instruction not recognized.");
+    // Route unrecognized commands to the local AI Agent
+    addLog(`Routing to AI Agent: "${normalizedCmd}"`, "info");
+
+    try {
+      let result: any = null;
+      if (window.electronAPI && typeof window.electronAPI.agentCommand === "function") {
+        result = await window.electronAPI.agentCommand(normalizedCmd);
+      } else {
+        const res = await fetch("/api/agent/command", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ command: normalizedCmd })
+        });
+        if (res.ok) {
+          result = await res.json();
+        }
+      }
+
+      if (result && !result.error) {
+        if (result.thoughts) {
+          addLog(`[AI THOUGHTS]: ${result.thoughts}`, "info");
+        }
+        if (result.logs && Array.isArray(result.logs)) {
+          result.logs.forEach((logLine: string) => {
+            addLog(`[AI EXECUTION]: ${logLine}`, "success");
+          });
+        }
+        if (result.response) {
+          addLog(result.response, "success");
+          speak(result.response);
+        }
+        
+        // Refresh the task list in case tasks were modified by the agent
+        await loadTasks();
+      } else {
+        throw new Error(result?.error || "Invalid response from AI Agent");
+      }
+    } catch (err: any) {
+      console.error("Agent execution failed:", err);
+      const errMessage = err.message || "AI Agent offline or failed to execute.";
+      addLog(`Failed to process command: "${normalizedCmd}". (Error: ${errMessage})`, "error");
+      speak("Instruction not recognized.");
+    }
 
     setIsProcessing(false);
   };

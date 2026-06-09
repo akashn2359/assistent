@@ -31,6 +31,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
     ipcRenderer.on("speech-error", sub);
     return () => ipcRenderer.removeListener("speech-error", sub);
   },
+  agentCommand: (command) => ipcRenderer.invoke("agent-command", command),
   windowControl: (action) => ipcRenderer.send("window-control", action),
   onShortcutTriggered: (callback) => {
     const subscription = (event) => callback();

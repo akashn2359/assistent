@@ -206,10 +206,10 @@ app.post("/api/media/command", async (req, res) => {
 // 9. Tasks API (tasks.txt)
 const tasksFilePath = path.join(process.env.USERPROFILE || "C:\\", "tasks.txt");
 
-app.get("/api/tasks", (req, res) => {
+function getTasksFromFile(): any[] {
   try {
     if (!fs.existsSync(tasksFilePath)) {
-      return res.json([]);
+      return [];
     }
     const rawText = fs.readFileSync(tasksFilePath, "utf-8");
     const lines = rawText.split(/\r?\n/);
@@ -235,7 +235,24 @@ app.get("/api/tasks", (req, res) => {
         created_at: new Date().toISOString()
       });
     }
-    res.json(parsedTasks);
+    return parsedTasks;
+  } catch (err) {
+    console.error("Error reading tasks file:", err);
+    return [];
+  }
+}
+
+function saveTasksToFile(tasks: any[]) {
+  const fileLines = tasks.map((t: any) => {
+    const marker = t.status === "completed" ? "[x]" : "[ ]";
+    return `${marker} ${t.title}`;
+  });
+  fs.writeFileSync(tasksFilePath, fileLines.join("\n"), "utf-8");
+}
+
+app.get("/api/tasks", (req, res) => {
+  try {
+    res.json(getTasksFromFile());
   } catch (err: any) {
     res.status(500).json({ error: "Failed to read tasks", details: err.message });
   }
@@ -244,14 +261,151 @@ app.get("/api/tasks", (req, res) => {
 app.post("/api/tasks", (req, res) => {
   const { tasks } = req.body;
   try {
-    const fileLines = tasks.map((t: any) => {
-      const marker = t.status === "completed" ? "[x]" : "[ ]";
-      return `${marker} ${t.title}`;
-    });
-    fs.writeFileSync(tasksFilePath, fileLines.join("\n"), "utf-8");
+    saveTasksToFile(tasks);
     res.json({ success: true });
   } catch (err: any) {
     res.status(500).json({ error: "Failed to write tasks", details: err.message });
+  }
+});
+
+// 10. AI Agent Command Execution (Local Ollama qwen2.5-coder:7b)
+const systemPrompt = `You are the core intelligence of VoicePilot, a cyberpunk terminal desktop assistant.
+You can execute system actions on the user's computer by outputting a JSON object.
+
+The user's query may request task listing, volume adjustment, brightness adjustment, application opening, or running arbitrary shell commands.
+
+You MUST respond in raw JSON format (no markdown code blocks, just raw JSON).
+The JSON object must follow this structure:
+{
+  "thoughts": "Brief explanation of your plan to complete the user's command",
+  "actions": [
+    { "type": "volume", "value": 80 }, 
+    { "type": "brightness", "value": 60 }, 
+    { "type": "mute", "value": true }, 
+    { "type": "open", "app": "notepad|calc|browser|folder", "path": "optional web URL or folder path" },
+    { "type": "task_add", "title": "Buy milk" },
+    { "type": "task_complete", "id": 1, "query": "optional text query" },
+    { "type": "task_delete", "id": 2, "query": "optional text query" },
+    { "type": "task_list" },
+    { "type": "shell", "command": "PowerShell command to execute, e.g. Get-Process | Select-Object -First 5" }
+  ],
+  "response": "Text description of what you did. Keep it simple and clear."
+}
+
+Only return the raw JSON. Do not write any HTML, conversational text outside of the JSON, or markdown formatting tags. If no action is needed, return empty actions list.`;
+
+app.post("/api/agent/command", async (req, res) => {
+  const { command } = req.body;
+  if (!command) {
+    return res.status(400).json({ error: "Command text is required" });
+  }
+
+  console.log(`[AI Agent]: Processing user query: "${command}"`);
+
+  try {
+    const response = await fetch("http://localhost:11434/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": "Bearer ollama"
+      },
+      body: JSON.stringify({
+        model: "qwen2.5-coder:7b",
+        messages: [
+          { role: "system", content: systemPrompt },
+          { role: "user", content: command }
+        ],
+        temperature: 0.1,
+        response_format: { type: "json_object" }
+      })
+    });
+
+    if (!response.ok) {
+      const errText = await response.text();
+      throw new Error(`Ollama responded with status ${response.status}: ${errText}`);
+    }
+
+    const data: any = await response.json();
+    const replyContent = data.choices[0].message.content.trim();
+    console.log(`[AI Agent Raw Output]: ${replyContent}`);
+
+    const parsed = JSON.parse(replyContent);
+    const executionLogs: string[] = [];
+
+    // Execute actions
+    if (parsed.actions && Array.isArray(parsed.actions)) {
+      for (const action of parsed.actions) {
+        try {
+          if (action.type === "volume") {
+            await runPowerShellAction("SetVolume", `-Value ${action.value}`);
+            executionLogs.push(`Volume set to ${action.value}%`);
+          } else if (action.type === "brightness") {
+            await runPowerShellAction("SetBrightness", `-Value ${action.value}`);
+            executionLogs.push(`Brightness set to ${action.value}%`);
+          } else if (action.type === "mute") {
+            const valArg = action.value ? "$true" : "$false";
+            await runPowerShellAction("SetMute", `-MuteState ${valArg}`);
+            executionLogs.push(`System mute state set to ${action.value}`);
+          } else if (action.type === "open") {
+            let cmd = "";
+            if (action.app === "browser") {
+              const url = action.path || "https://google.com";
+              cmd = `powershell -Command "Start-Process '${url}'"`;
+            } else if (action.app === "folder") {
+              const folder = action.path || path.join(process.env.USERPROFILE || "C:\\", "Downloads");
+              cmd = `explorer.exe "${folder}"`;
+            } else if (action.app === "notepad") {
+              cmd = "notepad.exe";
+            } else if (action.app === "calc") {
+              cmd = "calc.exe";
+            }
+            if (cmd) {
+              exec(cmd);
+              executionLogs.push(`Launched application: ${action.app}`);
+            }
+          } else if (action.type === "task_add") {
+            const tasks = getTasksFromFile();
+            const newId = tasks.length > 0 ? Math.max(...tasks.map((t: any) => t.id)) + 1 : 1;
+            tasks.push({ id: newId, title: action.title, status: "pending", created_at: new Date().toISOString() });
+            saveTasksToFile(tasks);
+            executionLogs.push(`Added task: "${action.title}"`);
+          } else if (action.type === "task_complete") {
+            const tasks = getTasksFromFile();
+            const target = tasks.find((t: any) => t.id === action.id || (action.query && t.title.toLowerCase().includes(action.query.toLowerCase())));
+            if (target) {
+              target.status = "completed";
+              saveTasksToFile(tasks);
+              executionLogs.push(`Completed task: "${target.title}"`);
+            }
+          } else if (action.type === "task_delete") {
+            let tasks = getTasksFromFile();
+            const target = tasks.find((t: any) => t.id === action.id || (action.query && t.title.toLowerCase().includes(action.query.toLowerCase())));
+            if (target) {
+              tasks = tasks.filter((t: any) => t.id !== target.id);
+              saveTasksToFile(tasks);
+              executionLogs.push(`Deleted task: "${target.title}"`);
+            }
+          } else if (action.type === "shell") {
+            console.log(`[AI Agent Execution]: Running Shell Command: "${action.command}"`);
+            const { stdout } = await execAsync(action.command);
+            executionLogs.push(`Shell output: ${stdout.trim().substring(0, 300)}`);
+          }
+        } catch (actionErr: any) {
+          console.error(`Failed to execute action ${action.type}:`, actionErr.message);
+          executionLogs.push(`Error executing ${action.type}: ${actionErr.message}`);
+        }
+      }
+    }
+
+    res.json({
+      thoughts: parsed.thoughts,
+      response: parsed.response,
+      logs: executionLogs
+    });
+
+  } catch (err: any) {
+    console.error("AI Agent query failed:", err.message);
+    res.status(500).json({ error: "AI agent query failed", details: err.message });
   }
 });
 
