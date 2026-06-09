@@ -3,7 +3,7 @@ export interface Command {
   phrase: string;
   description: string;
   category: "core" | "system" | "automation";
-  actionType: "text" | "time" | "date" | "stop" | "exit" | "volume_up" | "volume_down" | "volume_mute" | "app_browser" | "app_folder" | "shutdown" | "abort" | "cpu_usage" | "memory_usage" | "battery_status" | "disk_space";
+  actionType: "text" | "time" | "date" | "stop" | "exit" | "volume_up" | "volume_down" | "volume_mute" | "app_browser" | "app_folder" | "shutdown" | "abort" | "cpu_usage" | "memory_usage" | "battery_status" | "disk_space" | "open_notepad" | "open_calc" | "media_play_pause" | "media_next" | "media_prev" | "brightness_up" | "brightness_down";
   response: string;
 }
 
