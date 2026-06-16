@@ -874,6 +874,34 @@ export const TaskAssistantDashboard: React.FC = () => {
     }
   };
 
+  const handleClearCompleted = async () => {
+    const completed = tasks.filter((t) => t.status === "completed");
+    if (completed.length === 0) {
+      addLog("No completed tasks to clear.", "info");
+      speak("You have no completed tasks to clear.");
+      return;
+    }
+    const updated = tasks.filter((t) => t.status !== "completed");
+    await saveTasks(updated);
+    addLog(`Cleared ${completed.length} completed task(s).`, "success");
+    speak(`Cleared ${completed.length} completed tasks`);
+    playSFX("click");
+  };
+
+  const handleClearAll = async () => {
+    if (tasks.length === 0) {
+      addLog("No tasks to clear.", "info");
+      speak("Your task list is already empty.");
+      return;
+    }
+    if (window.confirm("Are you sure you want to clear all tasks?")) {
+      await saveTasks([]);
+      addLog("Cleared all tasks from tasks.txt.", "success");
+      speak("Cleared all tasks");
+      playSFX("click");
+    }
+  };
+
   // Main Command Handler (100% Offline Logic)
   const handleCommand = async (rawCommand: string) => {
     if (!rawCommand.trim()) return;
@@ -1204,6 +1232,52 @@ export const TaskAssistantDashboard: React.FC = () => {
         const responseText = `You have ${pending.length} pending tasks: ${taskListStr}`;
         addLog(responseText, "success");
         speak(responseText);
+      }
+      setIsProcessing(false);
+      return;
+    }
+
+    // E. Clear Completed Tasks (Matches: "clear completed tasks", "clear completed")
+    if (
+      clean === "clear completed tasks" ||
+      clean === "clear completed" ||
+      clean === "delete completed tasks" ||
+      clean === "remove completed tasks"
+    ) {
+      const completed = tasks.filter((t) => t.status === "completed");
+      if (completed.length === 0) {
+        const msg = "You have no completed tasks to clear.";
+        addLog(msg, "info");
+        speak(msg);
+      } else {
+        const updated = tasks.filter((t) => t.status !== "completed");
+        await saveTasks(updated);
+        const msg = `Cleared ${completed.length} completed task(s).`;
+        addLog(msg, "success");
+        speak(msg);
+        playSFX("click");
+      }
+      setIsProcessing(false);
+      return;
+    }
+
+    // F. Clear All Tasks (Matches: "clear all tasks", "clear tasks", "delete all tasks")
+    if (
+      clean === "clear all tasks" ||
+      clean === "clear tasks" ||
+      clean === "delete all tasks" ||
+      clean === "remove all tasks"
+    ) {
+      if (tasks.length === 0) {
+        const msg = "Your task list is already empty.";
+        addLog(msg, "info");
+        speak(msg);
+      } else {
+        await saveTasks([]);
+        const msg = "Cleared all tasks from your notepad file.";
+        addLog(msg, "success");
+        speak(msg);
+        playSFX("click");
       }
       setIsProcessing(false);
       return;
@@ -1806,11 +1880,25 @@ export const TaskAssistantDashboard: React.FC = () => {
                   <RefreshCw className="w-3 h-3" />
                 </button>
                 <button
+                  onClick={handleClearCompleted}
+                  className="flex items-center gap-1 px-1.5 py-0.5 rounded bg-amber-500/10 text-amber-400 border border-amber-500/20 text-[9px] font-bold hover:bg-amber-500/20 hover:text-amber-300 transition-all cursor-pointer"
+                  title="Clear Completed Tasks"
+                >
+                  CLEAR COMPLETED
+                </button>
+                <button
+                  onClick={handleClearAll}
+                  className="flex items-center gap-1 px-1.5 py-0.5 rounded bg-rose-500/10 text-rose-400 border border-rose-500/20 text-[9px] font-bold hover:bg-rose-500/20 hover:text-rose-300 transition-all cursor-pointer"
+                  title="Clear All Tasks"
+                >
+                  CLEAR ALL
+                </button>
+                <button
                   onClick={openNotepadFile}
                   className="flex items-center gap-1 px-1.5 py-0.5 rounded bg-indigo-500/10 text-indigo-400 border border-indigo-500/20 text-[9px] font-bold hover:bg-indigo-500/20 hover:text-indigo-300 transition-all cursor-pointer"
                   title="Open text file in Notepad"
                 >
-                  <FolderOpen className="w-2.5 h-2.5" /> OPEN NOTEPAD
+                  <FolderOpen className="w-2.5 h-2.5" /> OPEN
                 </button>
               </div>
             </div>

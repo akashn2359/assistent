@@ -429,6 +429,8 @@ The JSON object must follow this structure:
     { "type": "task_add", "title": "Buy milk" },
     { "type": "task_complete", "id": 1, "query": "optional text query" },
     { "type": "task_delete", "id": 2, "query": "optional text query" },
+    { "type": "task_clear_completed" },
+    { "type": "task_clear_all" },
     { "type": "task_list" },
     { "type": "shell", "command": "PowerShell command to execute, e.g. Get-Process | Select-Object -First 5" }
   ],
@@ -438,33 +440,82 @@ The JSON object must follow this structure:
 Only return the raw JSON. Do not write any HTML, conversational text outside of the JSON, or markdown formatting tags. If no action is needed, return empty actions list.`;
 
     try {
-      const response = await fetch("http://localhost:11434/v1/chat/completions", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Authorization": "Bearer ollama"
-        },
-        body: JSON.stringify({
-          model: "qwen2.5-coder:7b",
-          messages: [
-            { role: "system", content: systemPrompt },
-            { role: "user", content: command }
-          ],
-          temperature: 0.1,
-          response_format: { type: "json_object" }
-        })
-      });
+      const provider = process.env.AI_PROVIDER || (process.env.GEMINI_API_KEY && process.env.GEMINI_API_KEY !== "YOUR_API_KEY_HERE" && process.env.GEMINI_API_KEY !== "MY_GEMINI_API_KEY" ? "gemini" : "ollama");
+      let replyContent = "";
 
-      if (!response.ok) {
-        const errText = await response.text();
-        throw new Error(`Ollama responded with status ${response.status}: ${errText}`);
+      if (provider === "gemini") {
+        const apiKey = process.env.GEMINI_API_KEY;
+        if (!apiKey || apiKey === "YOUR_API_KEY_HERE" || apiKey === "MY_GEMINI_API_KEY") {
+          throw new Error("Gemini API key is not configured. Please set GEMINI_API_KEY in your .env file.");
+        }
+        console.log(`[Electron AI Agent]: Querying Gemini API (gemini-2.5-flash)...`);
+        const response = await fetch("https://generativelanguage.googleapis.com/v1beta/chat/completions", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Authorization": `Bearer ${apiKey}`
+          },
+          body: JSON.stringify({
+            model: "gemini-2.5-flash",
+            messages: [
+              { role: "system", content: systemPrompt },
+              { role: "user", content: command }
+            ],
+            temperature: 0.1,
+            response_format: { type: "json_object" }
+          })
+        });
+
+        if (!response.ok) {
+          const errText = await response.text();
+          throw new Error(`Gemini API responded with status ${response.status}: ${errText}`);
+        }
+
+        const data = await response.json();
+        replyContent = data.choices[0].message.content.trim();
+      } else {
+        console.log(`[Electron AI Agent]: Querying Local Ollama (qwen2.5-coder:7b)...`);
+        const response = await fetch("http://localhost:11434/v1/chat/completions", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Authorization": "Bearer ollama"
+          },
+          body: JSON.stringify({
+            model: "qwen2.5-coder:7b",
+            messages: [
+              { role: "system", content: systemPrompt },
+              { role: "user", content: command }
+            ],
+            temperature: 0.1,
+            response_format: { type: "json_object" }
+          })
+        });
+
+        if (!response.ok) {
+          const errText = await response.text();
+          throw new Error(`Ollama responded with status ${response.status}: ${errText}`);
+        }
+
+        const data = await response.json();
+        replyContent = data.choices[0].message.content.trim();
       }
 
-      const data = await response.json();
-      const replyContent = data.choices[0].message.content.trim();
       console.log(`[Electron AI Agent Raw Output]: ${replyContent}`);
 
-      const parsed = JSON.parse(replyContent);
+      // Sanitize any markdown JSON block wrapping if present
+      let cleanedContent = replyContent;
+      if (cleanedContent.startsWith("```json")) {
+        cleanedContent = cleanedContent.substring(7);
+      } else if (cleanedContent.startsWith("```")) {
+        cleanedContent = cleanedContent.substring(3);
+      }
+      if (cleanedContent.endsWith("```")) {
+        cleanedContent = cleanedContent.substring(0, cleanedContent.length - 3);
+      }
+      cleanedContent = cleanedContent.trim();
+
+      const parsed = JSON.parse(cleanedContent);
       const executionLogs = [];
 
       // Execute actions
@@ -518,8 +569,17 @@ Only return the raw JSON. Do not write any HTML, conversational text outside of 
               if (target) {
                 tasks = tasks.filter(t => t.id !== target.id);
                 writeTasksHelper(tasks);
-                executionLogs.push(`Deleted task: "${target.title}"`);
+                 executionLogs.push(`Deleted task: "${target.title}"`);
               }
+            } else if (action.type === "task_clear_completed") {
+              const tasks = readTasksHelper();
+              const completed = tasks.filter(t => t.status === "completed");
+              const pending = tasks.filter(t => t.status !== "completed");
+              writeTasksHelper(pending);
+              executionLogs.push(`Cleared ${completed.length} completed task(s)`);
+            } else if (action.type === "task_clear_all") {
+              writeTasksHelper([]);
+              executionLogs.push(`Cleared all tasks`);
             } else if (action.type === "shell") {
               console.log(`[Electron AI Agent Execution]: Running Shell Command: "${action.command}"`);
               const { stdout } = await execAsync(action.command);

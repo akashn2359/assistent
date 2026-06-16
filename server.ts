@@ -330,6 +330,8 @@ The JSON object must follow this structure:
     { "type": "task_add", "title": "Buy milk" },
     { "type": "task_complete", "id": 1, "query": "optional text query" },
     { "type": "task_delete", "id": 2, "query": "optional text query" },
+    { "type": "task_clear_completed" },
+    { "type": "task_clear_all" },
     { "type": "task_list" },
     { "type": "shell", "command": "PowerShell command to execute, e.g. Get-Process | Select-Object -First 5" }
   ],
@@ -347,33 +349,82 @@ app.post("/api/agent/command", async (req, res) => {
   console.log(`[AI Agent]: Processing user query: "${command}"`);
 
   try {
-    const response = await fetch("http://localhost:11434/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Authorization": "Bearer ollama"
-      },
-      body: JSON.stringify({
-        model: "qwen2.5-coder:7b",
-        messages: [
-          { role: "system", content: systemPrompt },
-          { role: "user", content: command }
-        ],
-        temperature: 0.1,
-        response_format: { type: "json_object" }
-      })
-    });
+    const provider = process.env.AI_PROVIDER || (process.env.GEMINI_API_KEY && process.env.GEMINI_API_KEY !== "YOUR_API_KEY_HERE" && process.env.GEMINI_API_KEY !== "MY_GEMINI_API_KEY" ? "gemini" : "ollama");
+    let replyContent = "";
 
-    if (!response.ok) {
-      const errText = await response.text();
-      throw new Error(`Ollama responded with status ${response.status}: ${errText}`);
+    if (provider === "gemini") {
+      const apiKey = process.env.GEMINI_API_KEY;
+      if (!apiKey || apiKey === "YOUR_API_KEY_HERE" || apiKey === "MY_GEMINI_API_KEY") {
+        throw new Error("Gemini API key is not configured. Please set GEMINI_API_KEY in your .env file.");
+      }
+      console.log(`[AI Agent]: Querying Gemini API (gemini-2.5-flash)...`);
+      const response = await fetch("https://generativelanguage.googleapis.com/v1beta/chat/completions", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${apiKey}`
+        },
+        body: JSON.stringify({
+          model: "gemini-2.5-flash",
+          messages: [
+            { role: "system", content: systemPrompt },
+            { role: "user", content: command }
+          ],
+          temperature: 0.1,
+          response_format: { type: "json_object" }
+        })
+      });
+
+      if (!response.ok) {
+        const errText = await response.text();
+        throw new Error(`Gemini API responded with status ${response.status}: ${errText}`);
+      }
+
+      const data: any = await response.json();
+      replyContent = data.choices[0].message.content.trim();
+    } else {
+      console.log(`[AI Agent]: Querying Local Ollama (qwen2.5-coder:7b)...`);
+      const response = await fetch("http://localhost:11434/v1/chat/completions", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": "Bearer ollama"
+        },
+        body: JSON.stringify({
+          model: "qwen2.5-coder:7b",
+          messages: [
+            { role: "system", content: systemPrompt },
+            { role: "user", content: command }
+          ],
+          temperature: 0.1,
+          response_format: { type: "json_object" }
+        })
+      });
+
+      if (!response.ok) {
+        const errText = await response.text();
+        throw new Error(`Ollama responded with status ${response.status}: ${errText}`);
+      }
+
+      const data: any = await response.json();
+      replyContent = data.choices[0].message.content.trim();
     }
 
-    const data: any = await response.json();
-    const replyContent = data.choices[0].message.content.trim();
     console.log(`[AI Agent Raw Output]: ${replyContent}`);
 
-    const parsed = JSON.parse(replyContent);
+    // Sanitize any markdown JSON block wrapping if present
+    let cleanedContent = replyContent;
+    if (cleanedContent.startsWith("```json")) {
+      cleanedContent = cleanedContent.substring(7);
+    } else if (cleanedContent.startsWith("```")) {
+      cleanedContent = cleanedContent.substring(3);
+    }
+    if (cleanedContent.endsWith("```")) {
+      cleanedContent = cleanedContent.substring(0, cleanedContent.length - 3);
+    }
+    cleanedContent = cleanedContent.trim();
+
+    const parsed = JSON.parse(cleanedContent);
     const executionLogs: string[] = [];
 
     // Execute actions
@@ -432,6 +483,17 @@ app.post("/api/agent/command", async (req, res) => {
               executionLogs.push(`Deleted task: "${target.title}"`);
               showToastNotification("Task Deleted", target.title);
             }
+          } else if (action.type === "task_clear_completed") {
+            const tasks = getTasksFromFile();
+            const completed = tasks.filter((t: any) => t.status === "completed");
+            const pending = tasks.filter((t: any) => t.status !== "completed");
+            saveTasksToFile(pending);
+            executionLogs.push(`Cleared ${completed.length} completed task(s)`);
+            showToastNotification("Tasks Cleared", `Removed ${completed.length} completed tasks.`);
+          } else if (action.type === "task_clear_all") {
+            saveTasksToFile([]);
+            executionLogs.push(`Cleared all tasks`);
+            showToastNotification("Tasks Cleared", "All tasks have been deleted.");
           } else if (action.type === "shell") {
             console.log(`[AI Agent Execution]: Running Shell Command: "${action.command}"`);
             const { stdout } = await execAsync(action.command);
